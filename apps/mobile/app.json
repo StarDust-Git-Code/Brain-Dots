@@ -1,0 +1,35 @@
+﻿{
+  "expo": {
+    "name": "OpenDots",
+    "slug": "opendots",
+    "version": "1.0.0",
+    "scheme": "opendots",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": ["expo-router"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.opendots.mobile",
+      "newArchEnabled": true
+    },
+    "android": {
+      "package": "com.opendots.mobile",
+      "newArchEnabled": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "extra": {
+      "eas": {
+        "projectId": ""
+      },
+      "firebase": {
+        "apiKey": "PASTE_YOUR_FIREBASE_API_KEY",
+        "authDomain": "PASTE_YOUR_PROJECT.firebaseapp.com",
+        "projectId": "PASTE_YOUR_PROJECT_ID",
+        "appId": "PASTE_YOUR_FIREBASE_APP_ID"
+      }
+    }
+  }
+}

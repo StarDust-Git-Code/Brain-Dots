@@ -1,0 +1,147 @@
+rules_version = '2';
+
+// ============================================================================
+// OpenDots — Firestore security rules
+//
+// Isolation model
+//   * Every top-level document carries a `userId` field that must equal the
+//     Firebase Auth uid of the signed-in caller.
+//   * Task subcollections (runs, events) and conversation messages carry no
+//     userId of their own; they are protected by an ownership check on their
+//     PARENT document.
+//   * The Render background workers use the Firebase Admin SDK, which bypasses
+//     these rules by design (they are trusted server code).
+//   * Anything not explicitly allowed below is denied by default.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------
+    // Helper functions
+    // ------------------------------------------------------------------
+
+    // The caller must be authenticated.
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // read / update / delete: the EXISTING document must belong to the caller.
+    // Never use in create rules (resource.data does not exist yet there).
+    function ownsExistingDoc() {
+      return signedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // create: the NEW document must be stamped with the caller's own uid.
+    function stampsOwnUid() {
+      return signedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    // Ownership check for documents under tasks/{taskId}/... : the parent task
+    // must exist and belong to the caller. get() denies when it does not exist.
+    function parentTaskOwned(taskId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/tasks/$(taskId)).data.userId == request.auth.uid;
+    }
+
+    // Ownership check for documents under conversations/{id}/messages: the
+    // parent conversation must exist and belong to the caller.
+    function parentConversationOwned(conversationId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+    }
+
+    // ------------------------------------------------------------------
+    // users — one profile document per user. The document id is the
+    // Firebase Auth uid, so ownership is checked against the doc id.
+    // ------------------------------------------------------------------
+    match /users/{userId} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    // ------------------------------------------------------------------
+    // spaces — per-user collection.
+    //   read:          only documents owned by the caller
+    //   create:        userId must be the caller's own uid
+    //   update/delete: only documents owned by the caller
+    // ------------------------------------------------------------------
+    match /spaces/{spaceId} {
+      allow read: if ownsExistingDoc();
+      allow create: if stampsOwnUid();
+      allow update, delete: if ownsExistingDoc();
+    }
+
+    // dots — same per-user pattern as spaces.
+    match /dots/{dotId} {
+      allow read: if ownsExistingDoc();
+      allow create: if stampsOwnUid();
+      allow update, delete: if ownsExistingDoc();
+    }
+
+    // pages — same per-user pattern as spaces.
+    match /pages/{pageId} {
+      allow read: if ownsExistingDoc();
+      allow create: if stampsOwnUid();
+      allow update, delete: if ownsExistingDoc();
+    }
+
+    // memories — same per-user pattern as spaces.
+    match /memories/{memoryId} {
+      allow read: if ownsExistingDoc();
+      allow create: if stampsOwnUid();
+      allow update, delete: if ownsExistingDoc();
+    }
+
+    // ------------------------------------------------------------------
+    // conversations — per-user collection, plus its messages subcollection.
+    // ------------------------------------------------------------------
+    match /conversations/{conversationId} {
+      allow read: if ownsExistingDoc();
+      allow create: if stampsOwnUid();
+      allow update, delete: if ownsExistingDoc();
+
+      // messages — no userId inside message docs; protected via the parent
+      // conversation's ownership. Create only requires the parent check.
+      match /messages/{messageId} {
+        allow read, update, delete: if parentConversationOwned(conversationId);
+        allow create: if parentConversationOwned(conversationId)
+          && request.resource.data is map;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // tasks — per-user collection, plus the runs and events subcollections
+    // that the background workers and clients append to.
+    // ------------------------------------------------------------------
+    match /tasks/{taskId} {
+      allow read: if ownsExistingDoc();
+      allow create: if stampsOwnUid();
+      allow update, delete: if ownsExistingDoc();
+
+      // runs — no userId inside run docs; protected via the parent task.
+      // Create requires only authentication + parent ownership; the run
+      // document itself needs no userId field (request.resource.data exists).
+      match /runs/{runId} {
+        allow read, update, delete: if parentTaskOwned(taskId);
+        allow create: if parentTaskOwned(taskId)
+          && request.resource.data is map;
+      }
+
+      // events — no userId inside event docs; protected via the parent task.
+      match /events/{eventId} {
+        allow read, update, delete: if parentTaskOwned(taskId);
+        allow create: if parentTaskOwned(taskId)
+          && request.resource.data is map;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Explicit deny-all catch-all. Firestore denies unmatched paths by
+    // default; this documents that intent for auditors. It never grants
+    // anything (rules are additive: any matching `allow if true` wins).
+    // ------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

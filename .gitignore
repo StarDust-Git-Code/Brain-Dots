@@ -1,0 +1,34 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.opendots/
+artifacts/
+playwright-report/
+test-results/
+docs/superpowers/
+RESEARCH.md
+.DS_Store
+
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local hosted-project selection
+.copilotkit/
+
+# Next.js / Vercel
+.next/
+.vercel/
+
+# Expo / mobile
+.expo/
+*.orig.*
+
+# Firebase CLI
+.firebase/
+firebase-debug.log
+ui-debug.log
+*-debug.log

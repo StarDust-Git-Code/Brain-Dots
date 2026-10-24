@@ -1,0 +1,15 @@
+{
+  "name": "opendots-render-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test:emulator": "node test/double-claim.test.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "firebase-admin": "^12.6.0",
+    "zod": "^3.23.8"
+  }
+}
