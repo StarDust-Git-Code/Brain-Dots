@@ -1,157 +1,99 @@
 import express from 'express';
-import { cert, initializeApp } from 'firebase-admin/app';
+import { cert, deleteApp, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createClaimer } from './lib/claim.js';
+import { closeHttpServer, errorMessage } from './lib/control.js';
+import { pingSelf, runTurn } from './lib/turn.js';
+import { createWorker, pollIntervalFromEnv, SHUTDOWN_TIMEOUT_MS } from './lib/worker.js';
 
-const REQUIRED_ENV = ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY'];
+const REQUIRED_ENV = ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY',
+  'VERCEL_API_URL', 'OWNER_TOKEN'];
+const LEASE_MS = 5 * 60 * 1000;
 
-const WORKER_ID = `render-${randomUUID()}`;
-const SELF_URL = process.env.SELF_URL;
-const VERCEL_API_URL = process.env.VERCEL_API_URL;
-const OWNER_TOKEN = process.env.OWNER_TOKEN;
-
-const PING_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-const HEARTBEAT_INTERVAL_MS = 60 * 1000; // 60 seconds
-const LEASE_MS = 5 * 60 * 1000; // 5 minute lease
-const POLL_INTERVAL_MS = 2000;
-const TURN_TIMEOUT_MS = 85_000;
-const SHUTDOWN_DELAY_MS = 5000;
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function exitSoon(message) {
-  console.error(message);
-  console.error(`Worker ${WORKER_ID} will exit in ${SHUTDOWN_DELAY_MS / 1000}s.`);
-  setTimeout(() => process.exit(1), SHUTDOWN_DELAY_MS);
-}
-
-async function runTurn(claim) {
-  const res = await fetch(`${VERCEL_API_URL}/api/copilotkit/agent/${claim.dotId || 'default'}/run`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(OWNER_TOKEN ? { Authorization: `Bearer ${OWNER_TOKEN}` } : {}),
-    },
-    body: JSON.stringify({
-      threadId: claim.threadId,
-      messages: [{ role: 'user', content: claim.prompt }],
-    }),
-    signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Vercel API returned ${res.status}: ${text.slice(0, 500)}`);
-  }
-
-  const data = await res.json().catch(() => null);
-  const text =
-    typeof data?.text === 'string' && data.text.length > 0 ? data.text : data ? JSON.stringify(data) : '';
-  return { text, sources: [], sample: false };
-}
-
-async function main() {
-  initializeApp({
-    credential: cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    }),
-  });
-
-  if (!VERCEL_API_URL) {
-    console.warn('VERCEL_API_URL is not set; every run will fail until it is provided.');
-  }
-
-  const claimer = createClaimer({
-    adminDb: getFirestore(),
-    workerId: WORKER_ID,
-    leaseMs: LEASE_MS,
-  });
-
-  // Self-ping to stay awake on Render free tier
-  if (SELF_URL) {
-    setInterval(async () => {
-      try {
-        await fetch(`${SELF_URL}/api/ping`);
-      } catch {
-        // ignore ping failures
-      }
-    }, PING_INTERVAL_MS);
-  } else {
-    console.warn('SELF_URL is not set; self-ping disabled (service may spin down on Render free tier).');
-  }
-
-  async function loop() {
-    while (true) {
-      let claim = null;
-      try {
-        claim = await claimer.claimTask();
-      } catch (e) {
-        console.error('worker loop error:', e instanceof Error ? e.message : String(e));
-        await sleep(POLL_INTERVAL_MS);
-        continue;
-      }
-
-      if (!claim) {
-        await sleep(POLL_INTERVAL_MS);
-        continue;
-      }
-
-      // Keep the lease alive while the turn is in flight.
-      const heartbeat = setInterval(() => {
-        claimer.heartbeat(claim.id).catch(() => {});
-      }, HEARTBEAT_INTERVAL_MS);
-
-      try {
-        const result = await runTurn(claim);
-        const settled = await claimer.settleSuccess(claim, result);
-        if (!settled) {
-          console.error('worker loop error: lease no longer held; run result discarded');
-        }
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        try {
-          const settled = await claimer.settleFailure(claim, message);
-          if (!settled) {
-            console.error('worker loop error: lease no longer held; failure not recorded');
-          }
-        } catch (se) {
-          console.error('worker loop error:', se instanceof Error ? se.message : String(se));
-        }
-      } finally {
-        clearInterval(heartbeat);
-      }
-    }
-  }
-
+export function createHttpApp({ worker, workerId, clock = Date.now }) {
   const app = express();
   app.get('/api/ping', (_req, res) =>
-    res.json({ ok: true, worker: WORKER_ID, at: new Date().toISOString() }),
+    res.json({ ok: true, worker: workerId, at: new Date(clock()).toISOString() }),
   );
-  app.get('/api/health', (_req, res) =>
-    res.json({
-      ok: true,
-      worker: WORKER_ID,
-      uptimeSeconds: Math.round(process.uptime()),
-      at: new Date().toISOString(),
-    }),
-  );
-
-  const PORT = Number(process.env.PORT) || 3000;
-  app.listen(PORT, () => {
-    console.log(`Worker ${WORKER_ID} listening on ${PORT}`);
-    void loop();
+  app.get('/api/health', (_req, res) => {
+    const health = worker.health();
+    res.status(health.stopping ? 503 : 200).json({
+      ok: !health.stopping, worker: workerId, uptimeSeconds: Math.floor(process.uptime()),
+      lastSuccessfulPingAt: health.lastSuccessfulPingAt, selfPingEnabled: health.selfPingEnabled,
+      busy: health.busy, stopping: health.stopping, at: new Date(clock()).toISOString(),
+    });
   });
+  return app;
 }
 
-const missing = REQUIRED_ENV.filter((name) => !process.env[name]);
-if (missing.length > 0) {
-  exitSoon(
-    `Missing required environment variables: ${missing.join(', ')}. ` +
-      'Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY before starting the worker.',
-  );
-} else {
-  main().catch((e) => exitSoon(`Worker startup failed: ${e instanceof Error ? e.message : String(e)}`));
+export async function main(env = process.env) {
+  const missing = REQUIRED_ENV.filter((name) => !env[name]?.trim());
+  if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(', ')}.`);
+  const pollIntervalMs = pollIntervalFromEnv(env);
+  const port = env.PORT ? Number(env.PORT) : 3000;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be between 1 and 65535.');
+  const workerId = `render-${randomUUID()}`;
+  const firebaseApp = initializeApp({
+    credential: cert({
+      projectId: env.FIREBASE_PROJECT_ID,
+      clientEmail: env.FIREBASE_CLIENT_EMAIL,
+      privateKey: env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    }),
+  });
+  const claimer = createClaimer({
+    adminDb: getFirestore(firebaseApp), workerId,
+    leaseMs: LEASE_MS,
+  });
+  const worker = createWorker({
+    claimer, pollIntervalMs,
+    runTurn: (claim, { signal }) => runTurn(claim, {
+      apiUrl: env.VERCEL_API_URL, ownerToken: env.OWNER_TOKEN, signal,
+    }),
+    ping: env.SELF_URL ? ({ signal }) => pingSelf(env.SELF_URL, { signal }) : null,
+  });
+  const server = createHttpApp({ worker, workerId }).listen(port);
+  try { await once(server, 'listening'); } catch (error) {
+    await deleteApp(firebaseApp);
+    throw error;
+  }
+  let shutdownPromise;
+  function shutdown(signal) {
+    if (shutdownPromise) return shutdownPromise;
+    console.log(`Worker ${workerId} received ${signal}; shutting down.`);
+    const hardDeadline = setTimeout(() => {
+      server.closeAllConnections?.();
+      process.exit(0);
+    }, SHUTDOWN_TIMEOUT_MS);
+    shutdownPromise = Promise.all([
+      worker.stop(`Received ${signal}.`), closeHttpServer(server, SHUTDOWN_TIMEOUT_MS),
+    ]).then(async ([workerStopped, serverClosed]) => {
+      if (!workerStopped || !serverClosed) console.warn('Shutdown reached a deadline; any remaining lease will expire.');
+      await deleteApp(firebaseApp);
+      clearTimeout(hardDeadline);
+      process.exit(0);
+    }).catch((error) => {
+      console.error(`Worker shutdown error: ${errorMessage(error)}`);
+      clearTimeout(hardDeadline);
+      process.exit(1);
+    });
+    return shutdownPromise;
+  }
+  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.once('SIGINT', () => { void shutdown('SIGINT'); });
+  if (!env.SELF_URL) console.warn('SELF_URL is not set; self-ping disabled.');
+  console.log(`Worker ${workerId} listening on ${port}; idle poll ${pollIntervalMs}ms.`);
+  worker.start();
+  return { worker, server };
+}
+
+// Module/syntax checks and tests can import the service without credentials or I/O.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`Worker startup failed: ${errorMessage(error)}`);
+    process.exitCode = 1;
+  });
 }

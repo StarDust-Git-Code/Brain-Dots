@@ -1,4 +1,4 @@
-﻿{
+{
   "cli": {
     "version": ">= 7.0.0"
   },
@@ -8,7 +8,10 @@
       "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
     },
     "production": {
       "autoIncrement": true

@@ -1,19 +1,22 @@
-﻿{
+{
   "expo": {
-    "name": "OpenDots",
-    "slug": "opendots",
+    "name": "Brain-Dots",
+    "slug": "brain-dots",
+    "owner": "star_dust_911",
     "version": "1.0.0",
-    "scheme": "opendots",
+    "scheme": "braindots",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "plugins": ["expo-router"],
+    "plugins": [
+      "expo-router"
+    ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.opendots.mobile",
+      "bundleIdentifier": "com.stardust.braindots",
       "newArchEnabled": true
     },
     "android": {
-      "package": "com.opendots.mobile",
+      "package": "com.stardust.braindots",
       "newArchEnabled": true
     },
     "web": {
@@ -21,14 +24,18 @@
       "output": "single"
     },
     "extra": {
+      "apiBaseUrl": "https://brain-dots.vercel.app",
       "eas": {
-        "projectId": ""
+        "projectId": "217a9716-d82b-499f-9b23-b993adfc3534"
       },
       "firebase": {
         "apiKey": "AIzaSyALRu24cp-2IzU2S8DMPuMgue1MD_X6xF4",
         "authDomain": "brain-dots-pvt.firebaseapp.com",
         "projectId": "brain-dots-pvt",
         "appId": "1:4686168926:web:c9985842b8a44912efc5cf"
+      },
+      "router": {
+        "origin": false
       }
     }
   }

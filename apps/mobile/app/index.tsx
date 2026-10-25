@@ -9,7 +9,7 @@ export default function Index() {
     return (
       <View style={styles.center}>
         <ActivityIndicator color={colors.accent} />
-        <Text style={styles.brand}>OpenDots</Text>
+        <Text style={styles.brand}>Brain-Dots</Text>
       </View>
     );
   if (!user) return <Redirect href="/login" />;

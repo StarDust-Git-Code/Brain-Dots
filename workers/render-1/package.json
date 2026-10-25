@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "test:emulator": "node test/double-claim.test.mjs"
+    "test": "node --test test/claim.test.mjs test/turn.test.mjs test/worker.test.mjs",
+    "test:emulator": "node --test test/double-claim.test.mjs",
+    "check": "node test/check.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",

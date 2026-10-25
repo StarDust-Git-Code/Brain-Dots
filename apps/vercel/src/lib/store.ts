@@ -28,7 +28,7 @@ const tasksCol = db.collection('tasks');
 const REQUIRED_ENV = ['NVIDIA_NIM_API_KEY', 'NVIDIA_NIM_BASE_URL', 'NVIDIA_NIM_MODEL'] as const;
 
 function hydrate<T>(id: string, data: DocumentData): T {
-  return { id, ...data } as T;
+  return { ...data, id } as T;
 }
 
 // Per-user lists are small, so equality filters are combined without orderBy
@@ -191,6 +191,7 @@ async function assertPageInSpace(userId: string, spaceId: string, pageId: string
 }
 
 async function listPages(userId: string, spaceId: string): Promise<Page[]> {
+  await assertSpaceExists(userId, spaceId);
   const snap = await pagesCol.where('userId', '==', userId).where('spaceId', '==', spaceId).get();
   return sorted(snap.docs.map((d) => hydrate<Page>(d.id, d.data())), 'asc');
 }
@@ -406,10 +407,10 @@ async function getMessages(userId: string, conversationId: string, limit = 100):
   const snap = await conversationsCol
     .doc(conversationId)
     .collection('messages')
-    .orderBy('createdAt', 'asc')
+    .orderBy('createdAt', 'desc')
     .limit(limit)
     .get();
-  return snap.docs.map((d) => hydrate<Message>(d.id, d.data()));
+  return snap.docs.map((d) => hydrate<Message>(d.id, d.data())).reverse();
 }
 
 async function getRecentMessages(
@@ -439,8 +440,8 @@ interface TaskInput {
 }
 
 async function listTasks(userId: string): Promise<Task[]> {
-  const snap = await tasksCol.where('userId', '==', userId).get();
-  return sorted(snap.docs.map((d) => hydrate<Task>(d.id, d.data())), 'desc').slice(0, 100);
+  const snap = await tasksCol.where('userId', '==', userId).orderBy('createdAt', 'desc').limit(100).get();
+  return snap.docs.map((d) => hydrate<Task>(d.id, d.data()));
 }
 
 async function getTask(userId: string, taskId: string): Promise<Task> {
@@ -448,6 +449,25 @@ async function getTask(userId: string, taskId: string): Promise<Task> {
 }
 
 async function createTask(userId: string, input: TaskInput): Promise<Task> {
+  let dotId = input.dotId ?? null;
+  let threadId = input.threadId ?? null;
+  if (threadId) {
+    const conversation = await getConversation(userId, threadId);
+    if (dotId && conversation.dotId !== dotId) {
+      throw new ApiError(400, 'Choose a conversation belonging to the selected Dot.');
+    }
+    dotId = conversation.dotId;
+    await getDot(userId, dotId);
+  } else {
+    const dot = dotId ? await getDot(userId, dotId) : (await listDots(userId))[0];
+    if (!dot) throw new ApiError(400, 'Create a Dot before scheduling a task.');
+    dotId = dot.id;
+    const conversation = await createConversation(userId, {
+      dotId,
+      title: input.prompt.trim().slice(0, 120),
+    });
+    threadId = conversation.id;
+  }
   const now = Date.now();
   const doc = {
     userId,
@@ -455,11 +475,12 @@ async function createTask(userId: string, input: TaskInput): Promise<Task> {
     status: 'queued' as TaskStatus,
     intervalSeconds: input.intervalSeconds ?? null,
     nextRunAt: null,
-    threadId: input.threadId ?? null,
-    dotId: input.dotId ?? null,
+    threadId,
+    dotId,
     workerId: null,
     lease: null,
     leaseUntil: null,
+    runId: null,
     createdAt: now,
     updatedAt: now,
     error: null,
@@ -467,6 +488,53 @@ async function createTask(userId: string, input: TaskInput): Promise<Task> {
   };
   const ref = await tasksCol.add(doc);
   return { id: ref.id, ...doc };
+}
+
+async function activeWorkerTask(
+  taskId: string,
+  lease: string,
+  dotId: string,
+  threadId: string,
+): Promise<Task> {
+  const snapshot = await tasksCol.doc(taskId).get();
+  const task = snapshot.data();
+  if (!snapshot.exists || !task || task.status !== 'running' ||
+      task.lease !== lease || !task.workerId ||
+      typeof task.leaseUntil !== 'number' || task.leaseUntil <= Date.now()) {
+    throw new ApiError(409, 'This task no longer has an active worker lease.');
+  }
+  if (task.dotId !== dotId || task.threadId !== threadId ||
+      typeof task.userId !== 'string' || !task.userId) {
+    throw new ApiError(403, 'The worker request does not match its assigned task.');
+  }
+  return hydrate<Task>(snapshot.id, task);
+}
+
+async function appendWorkerAssistant(
+  userId: string,
+  taskId: string,
+  lease: string,
+  dotId: string,
+  threadId: string,
+  content: string,
+): Promise<Message> {
+  const message: Message = { id: randomUUID(), role: 'assistant', content, createdAt: Date.now() };
+  return db.runTransaction(async (tx) => {
+    const task = (await tx.get(tasksCol.doc(taskId))).data();
+    const conversation = (await tx.get(conversationsCol.doc(threadId))).data();
+    if (!task || task.status !== 'running' || task.lease !== lease ||
+        typeof task.leaseUntil !== 'number' || task.leaseUntil <= Date.now()) {
+      throw new ApiError(409, 'This task no longer has an active worker lease.');
+    }
+    if (task.userId !== userId || task.dotId !== dotId || task.threadId !== threadId ||
+        conversation?.userId !== userId || conversation?.dotId !== dotId) {
+      throw new ApiError(403, 'The worker request does not match its assigned task.');
+    }
+    tx.set(conversationsCol.doc(threadId).collection('messages').doc(message.id), {
+      role: message.role, content: message.content, createdAt: message.createdAt,
+    });
+    return message;
+  });
 }
 
 async function actionTask(
@@ -488,16 +556,16 @@ async function actionTask(
     let status: TaskStatus;
     let error: string | null;
     if (action === 'run') {
-      if (!['failed', 'cancelled', 'interrupted', 'completed'].includes(task.status)) {
+      if (!['failed', 'cancelled', 'interrupted', 'completed', 'paused'].includes(task.status)) {
         throw new ApiError(400, 'Task is already queued or running.');
       }
       status = 'queued';
       error = null;
     } else if (action === 'pause') {
-      status = 'cancelled';
-      error = 'Task cancelled.';
+      status = 'paused';
+      error = null;
     } else {
-      if (task.status === 'completed') {
+      if (task.status === 'completed' && !task.nextRunAt) {
         throw new ApiError(400, 'Completed tasks cannot be cancelled.');
       }
       status = 'cancelled';
@@ -512,7 +580,25 @@ async function actionTask(
       nextRunAt: null,
       updatedAt: Date.now(),
     };
+    if (task.status === 'running' && task.lease) {
+      const running = task.runId
+        ? [await tx.get(ref.collection('runs').doc(task.runId))]
+        : (await tx.get(ref.collection('runs').where('status', '==', 'running').limit(20))).docs;
+      for (const run of running) {
+        if (!run.exists || run.data()?.status !== 'running') continue;
+        tx.update(run.ref, {
+          status: 'interrupted',
+          finishedAt: Date.now(),
+          error: 'Run interrupted by its owner. Review completed effects before retrying.',
+        });
+      }
+    }
     tx.update(ref, patch);
+    tx.set(ref.collection('events').doc(), {
+      taskId,
+      text: action === 'run' ? 'Task queued for an explicit run.' : `Task ${status} by its owner.`,
+      createdAt: Date.now(),
+    });
     return { ...task, ...patch };
   });
 }
@@ -543,6 +629,23 @@ function getSetupStatus(): SetupStatus {
   };
 }
 
+async function brainContext(userId: string, spaceIds: string[], query: string) {
+  const snapshot = await pagesCol.where('userId', '==', userId).limit(200).get();
+  const words = Array.from(new Set(query.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []));
+  return snapshot.docs
+    .map((doc) => hydrate<Page>(doc.id, doc.data()))
+    .filter((page) => spaceIds.includes(page.spaceId))
+    .map((page) => {
+      const title = page.title.toLowerCase();
+      const text = page.content.toLowerCase();
+      const score = words.reduce((sum, word) => sum + (title.includes(word) ? 4 : 0) + (text.includes(word) ? 1 : 0), 0);
+      return { page, score };
+    })
+    .sort((left, right) => right.score - left.score || right.page.updatedAt - left.page.updatedAt)
+    .slice(0, 4)
+    .map(({ page }) => ({ id: page.id, title: page.title, content: page.content.slice(0, 4000) }));
+}
+
 export const store = {
   spaces: {
     list: listSpaces,
@@ -559,6 +662,7 @@ export const store = {
     get: getPage,
     create: createPage,
     update: updatePage,
+    brainContext,
   },
   memories: {
     list: listMemories,
@@ -570,6 +674,7 @@ export const store = {
     get: getConversation,
     create: createConversation,
     appendMessage,
+    appendWorkerAssistant,
     getMessages,
     getRecentMessages,
   },
@@ -579,6 +684,7 @@ export const store = {
     create: createTask,
     action: actionTask,
     detail: getTaskDetail,
+    activeWorkerTask,
   },
   setup: {
     status: getSetupStatus,

@@ -4,12 +4,18 @@ services:
     env: node
     plan: free
     rootDir: workers/render-1
+    buildCommand: npm ci --omit=dev
     startCommand: npm start
+    healthCheckPath: /api/health
     envVars:
       - key: SELF_URL
         value: https://opendots-worker-1.onrender.com
       - key: VERCEL_API_URL
-        value: https://your-vercel-app.vercel.app
+        value: https://brain-dots.vercel.app
+      - key: NODE_VERSION
+        value: '22'
+      - key: WORKER_POLL_INTERVAL_MS
+        value: '30000'
       - key: OWNER_TOKEN
         sync: false
       - key: FIREBASE_PROJECT_ID
@@ -23,12 +29,18 @@ services:
     env: node
     plan: free
     rootDir: workers/render-2
+    buildCommand: npm ci --omit=dev
     startCommand: npm start
+    healthCheckPath: /api/health
     envVars:
       - key: SELF_URL
         value: https://opendots-worker-2.onrender.com
       - key: VERCEL_API_URL
-        value: https://your-vercel-app.vercel.app
+        value: https://brain-dots.vercel.app
+      - key: NODE_VERSION
+        value: '22'
+      - key: WORKER_POLL_INTERVAL_MS
+        value: '30000'
       - key: OWNER_TOKEN
         sync: false
       - key: FIREBASE_PROJECT_ID

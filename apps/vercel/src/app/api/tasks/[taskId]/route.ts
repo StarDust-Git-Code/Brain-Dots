@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+export const dynamic = 'force-dynamic';
 import { ApiError, handle, requireUser } from '../../../../lib/auth';
 import { rateLimit } from '../../../../lib/rate-limit';
 import { store } from '../../../../lib/store';

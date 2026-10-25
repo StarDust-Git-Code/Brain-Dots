@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { Redirect } from 'expo-router';
+import { useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -10,20 +11,24 @@ import {
   View,
 } from 'react-native';
 import { signIn, signUp } from '@/lib/firebase';
+import { useAuth } from '@/lib/auth-context';
 import { colors, radius, spacing } from '@/theme';
 
 export default function Login() {
+  const { user, loading } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const busyRef = useRef(false);
 
   const run = async (mode: 'in' | 'up') => {
-    if (busy || !email.trim() || password.length < 6) {
-      if (password.length > 0 && password.length < 6)
-        setError('Password must be at least 6 characters.');
+    if (busyRef.current) return;
+    if (!email.trim() || password.length < 6) {
+      setError(!email.trim() ? 'Enter your email address.' : 'Password must be at least 6 characters.');
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     setError('');
     try {
@@ -34,9 +39,13 @@ export default function Login() {
         e instanceof Error ? friendly(e.message) : 'Could not sign in.',
       );
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
+
+  if (loading) return <View style={styles.screen}><ActivityIndicator color={colors.accent} /></View>;
+  if (user) return <Redirect href="/(tabs)/chat" />;
 
   return (
     <KeyboardAvoidingView
@@ -44,7 +53,7 @@ export default function Login() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <View style={styles.card}>
-        <Text style={styles.brand}>OpenDots</Text>
+        <Text style={styles.brand}>Brain-Dots</Text>
         <Text style={styles.tag}>Your second brain, in your pocket.</Text>
         <TextInput
           style={styles.input}
@@ -52,6 +61,8 @@ export default function Login() {
           placeholderTextColor={colors.muted}
           autoCapitalize="none"
           keyboardType="email-address"
+          autoComplete="email"
+          editable={!busy}
           value={email}
           onChangeText={setEmail}
         />
@@ -60,6 +71,7 @@ export default function Login() {
           placeholder="Password"
           placeholderTextColor={colors.muted}
           secureTextEntry
+          editable={!busy}
           value={password}
           onChangeText={setPassword}
         />

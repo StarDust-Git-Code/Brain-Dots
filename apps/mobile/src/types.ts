@@ -1,6 +1,7 @@
 export type TaskStatus =
   | 'queued'
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'interrupted'
@@ -49,6 +50,9 @@ export interface Task {
   createdAt: number;
   error: string | null;
   result: TaskResult | null;
+  threadId?: string | null;
+  dotId?: string | null;
+  updatedAt?: number;
 }
 
 export interface Run {
@@ -57,12 +61,19 @@ export interface Run {
   startedAt: number;
   finishedAt: number | null;
   error: string | null;
+  result?: TaskResult | null;
 }
 
 export interface TaskEvent {
   id: string;
   text: string;
   createdAt: number;
+}
+
+export interface TaskDetail {
+  task: Task;
+  runs: Run[];
+  events: TaskEvent[];
 }
 
 export interface Conversation {

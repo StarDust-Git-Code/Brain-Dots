@@ -47,6 +47,12 @@ export async function handle(fn: () => Promise<NextResponse>): Promise<NextRespo
     if (error instanceof ZodError) {
       return NextResponse.json({ error: 'Invalid request payload.' }, { status: 400 });
     }
+    console.error('API request failed.', {
+      name: error instanceof Error ? error.name : 'UnknownError',
+      code: typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code).replace(/[^\w/-]/g, '').slice(0, 64)
+        : undefined,
+    });
     return NextResponse.json(
       { error: 'The server could not complete this request.' },
       { status: 500 },

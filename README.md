@@ -1,3 +1,18 @@
+# Brain-Dots
+
+Personal second-brain deployment of OpenDots with **Vercel, Firebase, two Render
+workers and NVIDIA NIM**.
+
+- **Web app:** https://brain-dots.vercel.app
+- **Deployment guide:** [ARCHITECTURE-NEW.md](ARCHITECTURE-NEW.md)
+- **Service roots:** `apps/vercel`, `workers/render-1`, `workers/render-2`.
+- **Mobile companion:** [apps/mobile/README.md](apps/mobile/README.md).
+
+Use those service directories for the Brain-Dots deployment. The OpenDots source
+and documentation below provide the upstream reference and attribution.
+
+---
+
 <div align="center">
 
 # OpenDots

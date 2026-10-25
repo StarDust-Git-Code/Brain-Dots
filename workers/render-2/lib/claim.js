@@ -1,249 +1,217 @@
 import { randomUUID } from 'node:crypto';
 
 const LEASE_EXPIRED_ERROR = 'Worker lease expired. Review completed effects before retrying.';
+const nonempty = (value) => typeof value === 'string' && value.trim().length > 0;
+const positive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
 
-// Pure claim/settle logic for the task queue. Side-effect-free at import time:
-// it never initializes firebase-admin itself, it only uses the adminDb handed in.
-export function createClaimer({ adminDb, workerId, leaseMs }) {
-  if (!adminDb) {
-    throw new Error('createClaimer requires an adminDb (Firestore) instance.');
-  }
-  if (!workerId) {
-    throw new Error('createClaimer requires a workerId.');
-  }
-  if (!leaseMs || leaseMs <= 0) {
-    throw new Error('createClaimer requires a positive leaseMs.');
-  }
+// Importing this module never initializes Firebase or contacts Firestore.
+export function createClaimer({ adminDb, workerId, leaseMs, clock = Date.now }) {
+  if (!adminDb) throw new Error('createClaimer requires an adminDb (Firestore) instance.');
+  if (!nonempty(workerId)) throw new Error('createClaimer requires a workerId.');
+  if (!positive(leaseMs)) throw new Error('createClaimer requires a positive leaseMs.');
+  if (typeof clock !== 'function') throw new Error('createClaimer requires a clock function.');
 
   const tasks = adminDb.collection('tasks');
+  let preferredKind = 'queued';
 
-  function eventDoc(taskId, eventId, text, now) {
-    return tasks.doc(taskId).collection('events').doc(eventId).set({
-      id: eventId,
-      taskId,
-      text,
-      createdAt: now,
-    });
+  function validClaim(claim) {
+    return claim && nonempty(claim.id) && nonempty(claim.runId) && nonempty(claim.lease) &&
+      claim.workerId === workerId;
   }
 
-  async function sweepExpiredLeases(now) {
-    const snap = await tasks
-      .where('status', '==', 'running')
-      .where('leaseUntil', '<=', now)
-      .get();
-    if (snap.empty) return 0;
-    const batch = adminDb.batch();
+  function ownsTask(data, claim, now) {
+    return data.status === 'running' && data.workerId === workerId &&
+      data.lease === claim.lease && data.runId === claim.runId &&
+      Number.isFinite(data.leaseUntil) && data.leaseUntil > now;
+  }
+
+  function ownsRun(data, claim, now) {
+    return data?.status === 'running' && data.id === claim.runId && data.taskId === claim.id &&
+      data.workerId === workerId && data.lease === claim.lease &&
+      Number.isFinite(data.leaseUntil) && data.leaseUntil > now;
+  }
+
+  async function readOwned(tx, claim, signal) {
+    if (signal?.aborted) return null;
+    const taskRef = tasks.doc(claim.id);
+    const task = await tx.get(taskRef);
+    if (!task.exists || signal?.aborted) return null;
+    const data = task.data();
+    if (!ownsTask(data, claim, clock())) return null;
+    const runRef = taskRef.collection('runs').doc(claim.runId);
+    const run = await tx.get(runRef);
+    // Recompute time on every transaction retry, after the reads, not before the RPC.
+    const now = clock();
+    if (signal?.aborted || !ownsTask(data, claim, now) || !ownsRun(run.data(), claim, now)) {
+      return null;
+    }
+    return { taskRef, runRef, data, now };
+  }
+
+  async function sweepExpiredLeases({ signal } = {}) {
+    if (signal?.aborted) return 0;
+    const snapshot = await tasks.where('status', '==', 'running')
+      .where('leaseUntil', '<=', clock()).orderBy('leaseUntil', 'asc').limit(20).get();
     let count = 0;
-    snap.forEach((doc) => {
-      batch.update(doc.ref, {
-        status: 'interrupted',
-        workerId: null,
-        lease: null,
-        leaseUntil: null,
-        error: LEASE_EXPIRED_ERROR,
-        updatedAt: now,
-      });
+    for (const candidate of snapshot.docs) {
+      if (signal?.aborted) break;
       const eventId = randomUUID();
-      batch.set(tasks.doc(doc.id).collection('events').doc(eventId), {
-        id: eventId,
-        taskId: doc.id,
-        text: 'Run interrupted: worker lease expired.',
-        createdAt: now,
+      const interrupted = await adminDb.runTransaction(async (tx) => {
+        const task = await tx.get(candidate.ref);
+        if (!task.exists || signal?.aborted) return false;
+        const data = task.data();
+        if (data.status !== 'running' || !Number.isFinite(data.leaseUntil) ||
+            data.leaseUntil > clock()) return false;
+
+        // Old workers did not persist task.runId or ownership in run docs. Resolve
+        // their running records under the same transaction before writing anything.
+        const runs = nonempty(data.runId)
+          ? [await tx.get(candidate.ref.collection('runs').doc(data.runId))]
+          : (await tx.get(candidate.ref.collection('runs')
+            .where('status', '==', 'running').limit(20))).docs;
+        const now = clock();
+        if (signal?.aborted || data.leaseUntil > now) return false;
+        tx.update(candidate.ref, {
+          status: 'interrupted', workerId: null, lease: null, leaseUntil: null,
+          nextRunAt: null, result: null, error: LEASE_EXPIRED_ERROR, updatedAt: now,
+        });
+        for (const run of runs) {
+          const record = run.data();
+          if (record?.status === 'running' &&
+              (record.workerId == null || record.workerId === data.workerId) &&
+              (record.lease == null || record.lease === data.lease)) {
+            tx.update(run.ref, {
+              status: 'interrupted', finishedAt: now, result: null, error: LEASE_EXPIRED_ERROR,
+            });
+          }
+        }
+        tx.set(candidate.ref.collection('events').doc(eventId), {
+          id: eventId, taskId: candidate.id, runId: data.runId ?? null,
+          text: 'Run interrupted: worker lease expired.', createdAt: now,
+        });
+        return true;
       });
-      count += 1;
-    });
-    await batch.commit();
+      if (interrupted) count += 1;
+    }
     return count;
   }
 
-  async function claimRecurringTask(doc, now) {
-    const taskRef = tasks.doc(doc.id);
+  async function claimCandidate(candidate, kind, signal) {
+    // IDs live outside the retryable callback: one committed run, lease and event.
     const lease = randomUUID();
     const runId = randomUUID();
     const eventId = randomUUID();
     return adminDb.runTransaction(async (tx) => {
-      const cur = await tx.get(taskRef);
-      if (!cur.exists) return null;
-      const data = cur.data();
-      const stillDue =
-        data.status === 'completed' &&
-        typeof data.nextRunAt === 'number' &&
-        data.nextRunAt <= now;
-      if (!stillDue) return null;
-      tx.update(taskRef, {
-        status: 'running',
-        workerId,
-        lease,
-        leaseUntil: now + leaseMs,
-        nextRunAt: null,
-        updatedAt: now,
+      if (signal?.aborted) return null;
+      const task = await tx.get(candidate.ref);
+      if (!task.exists || signal?.aborted) return null;
+      const data = task.data();
+      const now = clock();
+      const eligible = kind === 'queued' ? data.status === 'queued' :
+        data.status === 'completed' && positive(data.intervalSeconds) &&
+        Number.isFinite(data.nextRunAt) && data.nextRunAt <= now;
+      if (!eligible) return null;
+      const leaseUntil = now + leaseMs;
+      tx.update(candidate.ref, {
+        status: 'running', workerId, lease, runId, leaseUntil,
+        nextRunAt: null, result: null, error: null, updatedAt: now,
       });
-      tx.set(taskRef.collection('runs').doc(runId), {
-        id: runId,
-        taskId: doc.id,
-        status: 'running',
-        startedAt: now,
-        finishedAt: null,
-        result: null,
-        error: null,
+      tx.set(candidate.ref.collection('runs').doc(runId), {
+        id: runId, taskId: candidate.id, workerId, lease, leaseUntil,
+        status: 'running', startedAt: now, finishedAt: null, result: null, error: null,
       });
-      tx.set(taskRef.collection('events').doc(eventId), {
-        id: eventId,
-        taskId: doc.id,
-        text: 'Recurring task due; starting run.',
-        createdAt: now,
+      tx.set(candidate.ref.collection('events').doc(eventId), {
+        id: eventId, taskId: candidate.id, runId, createdAt: now,
+        text: kind === 'queued' ? 'Worker started run.' : 'Recurring task due; starting run.',
       });
       return {
-        id: doc.id,
-        prompt: data.prompt,
-        threadId: data.threadId ?? null,
-        dotId: data.dotId ?? null,
-        intervalSeconds: data.intervalSeconds ?? null,
-        userId: data.userId ?? null,
-        lease,
-        runId,
+        id: candidate.id, prompt: data.prompt ?? '', threadId: data.threadId ?? null,
+        dotId: data.dotId ?? null, intervalSeconds: data.intervalSeconds ?? null,
+        userId: data.userId ?? null, workerId, lease, runId, leaseUntil,
       };
     });
   }
 
-  async function claimQueuedTask(doc, now) {
-    const taskRef = tasks.doc(doc.id);
-    const lease = randomUUID();
-    const runId = randomUUID();
-    const eventId = randomUUID();
-    return adminDb.runTransaction(async (tx) => {
-      const cur = await tx.get(taskRef);
-      if (!cur.exists) return null;
-      const data = cur.data();
-      if (data.status !== 'queued') return null;
-      tx.update(taskRef, {
-        status: 'running',
-        workerId,
-        lease,
-        leaseUntil: now + leaseMs,
-        updatedAt: now,
-      });
-      tx.set(taskRef.collection('runs').doc(runId), {
-        id: runId,
-        taskId: doc.id,
-        status: 'running',
-        startedAt: now,
-        finishedAt: null,
-        result: null,
-        error: null,
-      });
-      tx.set(taskRef.collection('events').doc(eventId), {
-        id: eventId,
-        taskId: doc.id,
-        text: 'Worker started run.',
-        createdAt: now,
-      });
-      return {
-        id: doc.id,
-        prompt: data.prompt,
-        threadId: data.threadId ?? null,
-        dotId: data.dotId ?? null,
-        intervalSeconds: data.intervalSeconds ?? null,
-        userId: data.userId ?? null,
-        lease,
-        runId,
-      };
-    });
-  }
-
-  async function claimTask() {
-    const now = Date.now();
-
-    await sweepExpiredLeases(now);
-
-    const dueSnap = await tasks
-      .where('status', '==', 'completed')
-      .where('nextRunAt', '<=', now)
-      .orderBy('nextRunAt', 'asc')
-      .limit(5)
-      .get();
-    for (const doc of dueSnap.docs) {
-      const claim = await claimRecurringTask(doc, now);
-      if (claim) return claim;
+  async function claimTask({ signal } = {}) {
+    await sweepExpiredLeases({ signal });
+    // Alternate successful claims so an endless recurring backlog cannot starve
+    // fresh jobs (or vice versa). Within each class, take the oldest due job first.
+    for (const kind of [preferredKind, preferredKind === 'queued' ? 'recurring' : 'queued']) {
+      if (signal?.aborted) return null;
+      const query = kind === 'queued'
+        ? tasks.where('status', '==', 'queued').orderBy('createdAt', 'asc')
+        : tasks.where('status', '==', 'completed').where('nextRunAt', '<=', clock())
+          .orderBy('nextRunAt', 'asc');
+      const snapshot = await query.limit(5).get();
+      for (const candidate of snapshot.docs) {
+        if (signal?.aborted) return null;
+        const claim = await claimCandidate(candidate, kind, signal);
+        if (claim) {
+          preferredKind = kind === 'queued' ? 'recurring' : 'queued';
+          return claim;
+        }
+      }
     }
-
-    const queuedSnap = await tasks
-      .where('status', '==', 'queued')
-      .orderBy('createdAt', 'asc')
-      .limit(5)
-      .get();
-    for (const doc of queuedSnap.docs) {
-      const claim = await claimQueuedTask(doc, now);
-      if (claim) return claim;
-    }
-
     return null;
   }
 
-  async function settleSuccess(claim, result) {
-    const now = Date.now();
-    const taskRef = tasks.doc(claim.id);
-    const runRef = taskRef.collection('runs').doc(claim.runId);
+  async function checkOwnership(claim, { signal } = {}) {
+    if (!validClaim(claim)) return false;
+    return adminDb.runTransaction(async (tx) => Boolean(await readOwned(tx, claim, signal)));
+  }
+
+  async function heartbeat(claim, { signal } = {}) {
+    if (!validClaim(claim)) return false;
+    return adminDb.runTransaction(async (tx) => {
+      const owned = await readOwned(tx, claim, signal);
+      if (!owned) return false;
+      const leaseUntil = Math.max(owned.data.leaseUntil, owned.now + leaseMs);
+      tx.update(owned.taskRef, { leaseUntil, updatedAt: owned.now });
+      tx.update(owned.runRef, { leaseUntil });
+      return true;
+    });
+  }
+
+  async function finish(claim, status, result, error, { signal } = {}) {
+    if (!validClaim(claim)) return false;
     const eventId = randomUUID();
     return adminDb.runTransaction(async (tx) => {
-      const cur = await tx.get(taskRef);
-      if (!cur.exists) return false;
-      const data = cur.data();
-      if (data.lease !== claim.lease) return false;
+      const owned = await readOwned(tx, claim, signal);
+      if (!owned) return false;
+      const { taskRef, runRef, data, now } = owned;
+      const nextRunAt = status === 'completed' && positive(data.intervalSeconds)
+        ? now + data.intervalSeconds * 1000 : null;
       tx.update(taskRef, {
-        status: 'completed',
-        workerId: null,
-        lease: null,
-        leaseUntil: null,
-        result,
-        error: null,
-        updatedAt: now,
-        nextRunAt: claim.intervalSeconds ? now + claim.intervalSeconds * 1000 : null,
+        status, workerId: null, lease: null, leaseUntil: null,
+        result, error, nextRunAt, updatedAt: now,
       });
-      tx.update(runRef, { status: 'completed', finishedAt: now, result });
+      tx.update(runRef, { status, finishedAt: now, result, error });
       tx.set(taskRef.collection('events').doc(eventId), {
-        id: eventId,
-        taskId: claim.id,
-        text: 'Research brief ready.',
-        createdAt: now,
+        id: eventId, taskId: claim.id, runId: claim.runId, createdAt: now,
+        text: status === 'completed' ? 'Research brief ready.' :
+          `Run ${status}: ${error.slice(0, 300)}`,
       });
       return true;
     });
   }
 
-  async function settleFailure(claim, errorMessage) {
-    const now = Date.now();
-    const message = errorMessage instanceof Error ? errorMessage.message : String(errorMessage);
-    const taskRef = tasks.doc(claim.id);
-    const runRef = taskRef.collection('runs').doc(claim.runId);
-    const eventId = randomUUID();
-    return adminDb.runTransaction(async (tx) => {
-      const cur = await tx.get(taskRef);
-      if (!cur.exists) return false;
-      const data = cur.data();
-      if (data.lease !== claim.lease) return false;
-      tx.update(taskRef, {
-        status: 'failed',
-        workerId: null,
-        lease: null,
-        leaseUntil: null,
-        error: message,
-        updatedAt: now,
-      });
-      tx.update(runRef, { status: 'failed', finishedAt: now, error: message });
-      tx.set(taskRef.collection('events').doc(eventId), {
-        id: eventId,
-        taskId: claim.id,
-        text: `Run failed: ${message.slice(0, 300)}`,
-        createdAt: now,
-      });
-      return true;
-    });
+  async function settleSuccess(claim, result, options) {
+    if (!nonempty(result?.text) || result.error || result.ok === false) {
+      throw new Error('Cannot complete a task without a nonempty successful text result.');
+    }
+    return finish(claim, 'completed', result, null, options);
   }
 
-  async function heartbeat(taskId) {
-    await tasks.doc(taskId).update({ leaseUntil: Date.now() + leaseMs });
+  function settleFailure(claim, error, options) {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    return finish(claim, 'failed', null, message, options);
   }
 
-  return { claimTask, settleSuccess, settleFailure, heartbeat };
+  function settleInterrupted(claim, error, options) {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    return finish(claim, 'interrupted', null, message, options);
+  }
+
+  return { claimTask, sweepExpiredLeases, checkOwnership, heartbeat,
+    settleSuccess, settleFailure, settleInterrupted };
 }

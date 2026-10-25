@@ -1,145 +1,143 @@
-import { randomUUID } from 'node:crypto';
-import { initializeApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import assert from 'node:assert/strict';
+import test from 'node:test';
 import { createClaimer } from '../lib/claim.js';
+import { createEmulatorFixture } from './helpers/emulator.mjs';
+import { seedTask } from './helpers/memory-firestore.mjs';
 
-// Standalone double-claim test against the Firestore emulator. No test framework.
-// Run from workers/render-1 or workers/render-2:  npm run test:emulator
-// Requires the Firestore emulator on FIRESTORE_EMULATOR_HOST (default localhost:8080).
+const data = async (ref) => (await ref.get()).data();
+const result = (text) => ({ text, sources: [], sample: false });
 
-const EMULATOR_HOST = process.env.FIRESTORE_EMULATOR_HOST || 'localhost:8080';
-process.env.FIRESTORE_EMULATOR_HOST = EMULATOR_HOST;
-const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'opendots-emulator-test';
+// Explicit loopback emulator only; the fixture always uses an isolated demo-*
+// project and never loads production credentials/project configuration.
+test('Firestore emulator lease/race/settlement integration', { timeout: 60_000 }, async (t) => {
+  const { db, cleanup } = await createEmulatorFixture();
+  t.after(cleanup);
+  let now = Date.now();
+  const make = (workerId, clock = () => now, adminDb = db) =>
+    createClaimer({ adminDb, workerId, leaseMs: 60_000, clock });
+  const a = make('worker-a');
+  const b = make('worker-b');
+  const owner = (claim) => claim.workerId === 'worker-a' ? a : b;
+  const queued = await seedTask(db, 'queued', {}, now);
+  const recurring = await seedTask(db, 'recurring', {
+    status: 'completed', intervalSeconds: 300, nextRunAt: now - 1,
+  }, now);
+  let queuedClaim;
+  let recurringClaim;
 
-const results = [];
-function report(name, ok, detail = '') {
-  results.push({ name, ok });
-  console.log(`${ok ? 'PASS' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`);
-}
-
-async function emulatorReachable() {
-  try {
-    await fetch(`http://${EMULATOR_HOST}/`, { signal: AbortSignal.timeout(3000) });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function deleteTaskCompletely(db, ref) {
-  for (const sub of ['runs', 'events']) {
-    const snap = await ref.collection(sub).get();
-    if (!snap.empty) {
-      const batch = db.batch();
-      snap.forEach((d) => batch.delete(d.ref));
-      await batch.commit();
+  await t.test('simultaneous fresh/recurring claim has one stable run and lease each', async () => {
+    const claims = await Promise.all([a.claimTask(), b.claimTask()]);
+    assert.deepEqual(claims.map((claim) => claim.id).sort(), ['queued', 'recurring']);
+    queuedClaim = claims.find((claim) => claim.id === queued.id);
+    recurringClaim = claims.find((claim) => claim.id === recurring.id);
+    for (const [ref, claim] of [[queued, queuedClaim], [recurring, recurringClaim]]) {
+      const task = await data(ref);
+      assert.equal(task.status, 'running');
+      assert.equal(task.runId, claim.runId);
+      assert.equal(task.lease, claim.lease);
+      assert.equal(task.workerId, claim.workerId);
+      assert.equal((await ref.collection('runs').get()).size, 1);
+      assert.equal((await ref.collection('events').get()).size, 1);
     }
-  }
-  await ref.delete();
-}
-
-async function main() {
-  if (!(await emulatorReachable())) {
-    console.error(`Firestore emulator unreachable at ${EMULATOR_HOST}.`);
-    console.error('Start the emulator first, then re-run this test:');
-    console.error('  1. From the repo root: firebase emulators:start --only firestore');
-    console.error('     (Firestore emulator listens on localhost:8080 by default.)');
-    console.error('  2. From workers/render-1 or workers/render-2: npm run test:emulator');
-    process.exit(1);
-  }
-
-  initializeApp({ projectId: PROJECT_ID });
-  const db = getFirestore();
-  const tasks = db.collection('tasks');
-
-  const now = Date.now();
-  const baseDoc = (overrides = {}) => ({
-    userId: 'test-user',
-    prompt: 'double-claim test prompt',
-    status: 'queued',
-    intervalSeconds: null,
-    nextRunAt: null,
-    threadId: 'test-thread',
-    dotId: 'test-dot',
-    workerId: null,
-    lease: null,
-    leaseUntil: null,
-    createdAt: now - 10_000,
-    updatedAt: now - 10_000,
-    error: null,
-    result: null,
-    ...overrides,
   });
 
-  const queuedRef = tasks.doc(`test-queued-${randomUUID()}`);
-  const recurringRef = tasks.doc(`test-recurring-${randomUUID()}`);
-  await queuedRef.set(baseDoc());
-  await recurringRef.set(
-    baseDoc({ status: 'completed', intervalSeconds: 300, nextRunAt: now - 1_000 }),
-  );
+  await t.test('cancel then late heartbeat/completion cannot overwrite parent action', async () => {
+    const run = queued.collection('runs').doc(queuedClaim.runId);
+    await db.runTransaction(async (tx) => {
+      await tx.get(queued);
+      await tx.get(run);
+      tx.update(queued, { status: 'cancelled', workerId: null, lease: null, leaseUntil: null });
+      tx.update(run, { status: 'cancelled', finishedAt: now });
+    });
+    assert.equal(await owner(queuedClaim).heartbeat(queuedClaim), false);
+    assert.equal(await owner(queuedClaim).settleSuccess(queuedClaim, result('late')), false);
+    assert.equal(await owner(queuedClaim).settleFailure(queuedClaim, 'late failure'), false);
+    assert.equal((await data(queued)).status, 'cancelled');
+    assert.equal((await data(run)).status, 'cancelled');
+    assert.equal((await queued.collection('events').get()).size, 1);
+  });
 
-  const claimerA = createClaimer({ adminDb: db, workerId: 'test-worker-a', leaseMs: 60_000 });
-  const claimerB = createClaimer({ adminDb: db, workerId: 'test-worker-b', leaseMs: 60_000 });
+  await t.test('recurring success persists independent completed records and events', async () => {
+    assert.equal(await owner(recurringClaim).settleSuccess(recurringClaim, result('first')), true);
+    const firstRun = await data(recurring.collection('runs').doc(recurringClaim.runId));
+    now = (await data(recurring)).nextRunAt;
+    const claims = (await Promise.all([a.claimTask(), b.claimTask()])).filter(Boolean);
+    assert.equal(claims.length, 1);
+    const [second] = claims;
+    assert.notEqual(second.runId, recurringClaim.runId);
+    assert.notEqual(second.lease, recurringClaim.lease);
+    assert.equal(await owner(second).heartbeat(second), true);
+    assert.equal(await owner(second).settleSuccess(second, result('second')), true);
+    assert.deepEqual(await data(recurring.collection('runs').doc(recurringClaim.runId)), firstRun);
+    assert.equal((await recurring.collection('runs').get()).size, 2);
+    assert.equal((await recurring.collection('events').get()).size, 4);
+    assert.equal((await data(recurring)).result.text, 'second');
+    await recurring.update({ status: 'paused', nextRunAt: null });
+  });
 
-  try {
-    const [claimA, claimB] = await Promise.all([claimerA.claimTask(), claimerB.claimTask()]);
-    const claims = [claimA, claimB];
+  let interrupted;
+  let expiredClaim;
+  await t.test('competing sweeps atomically interrupt a run and do not retry it', async () => {
+    interrupted = await seedTask(db, 'interrupted', { intervalSeconds: 300 }, now);
+    expiredClaim = await a.claimTask();
+    now = expiredClaim.leaseUntil;
+    assert.equal(await a.heartbeat(expiredClaim), false);
+    const counts = await Promise.all([a.sweepExpiredLeases(), b.sweepExpiredLeases()]);
+    assert.equal(counts.reduce((sum, count) => sum + count, 0), 1);
+    assert.equal((await data(interrupted)).status, 'interrupted');
+    assert.equal((await data(interrupted.collection('runs').doc(expiredClaim.runId))).status, 'interrupted');
+    assert.equal((await interrupted.collection('events').get()).size, 2);
+    await interrupted.update({ nextRunAt: now - 1 });
+    assert.equal(await a.claimTask(), null);
+    assert.equal(await b.claimTask(), null);
+  });
 
-    const queuedClaims = claims.filter((c) => c && c.id === queuedRef.id);
-    report(
-      'exactly one claimer won the queued task',
-      queuedClaims.length === 1,
-      `queued claims: ${queuedClaims.length}`,
-    );
+  await t.test('explicit retry creates a new run; the old heartbeat/result stays stale', async () => {
+    await interrupted.update({ status: 'queued' });
+    const retry = await b.claimTask();
+    assert.notEqual(retry.runId, expiredClaim.runId);
+    assert.notEqual(retry.lease, expiredClaim.lease);
+    assert.equal(await a.heartbeat(expiredClaim), false);
+    assert.equal(await a.settleSuccess(expiredClaim, result('late')), false);
+    assert.equal(await b.settleSuccess(retry, result('reviewed retry')), true);
+    assert.equal((await interrupted.collection('runs').get()).size, 2);
+    assert.equal((await data(interrupted.collection('runs').doc(expiredClaim.runId))).status, 'interrupted');
+    await interrupted.update({ status: 'paused', nextRunAt: null });
+  });
 
-    const recurringClaims = claims.filter((c) => c && c.id === recurringRef.id);
-    report(
-      'exactly one claimer won the recurring task (no double-start)',
-      recurringClaims.length === 1,
-      `recurring claims: ${recurringClaims.length}`,
-    );
-
-    const queuedDoc = await queuedRef.get();
-    const q = queuedDoc.data() ?? {};
-    report(
-      'queued task doc is running under a lease',
-      queuedDoc.exists && q.status === 'running' && !!q.lease && !!q.workerId,
-      `status=${q.status} workerId=${q.workerId ?? 'null'}`,
-    );
-
-    const qRuns = await queuedRef.collection('runs').where('status', '==', 'running').get();
-    report('queued task has exactly 1 running run', qRuns.size === 1, `running runs: ${qRuns.size}`);
-
-    const recurringDoc = await recurringRef.get();
-    const r = recurringDoc.data() ?? {};
-    report(
-      'recurring task doc is running under a lease',
-      recurringDoc.exists && r.status === 'running' && !!r.lease,
-      `status=${r.status}`,
-    );
-
-    const rRunsAll = await recurringRef.collection('runs').get();
-    report('recurring task has exactly 1 run total', rRunsAll.size === 1, `runs: ${rRunsAll.size}`);
-    const rRunsRunning = await recurringRef
-      .collection('runs')
-      .where('status', '==', 'running')
-      .get();
-    report(
-      'recurring task has exactly 1 running run',
-      rRunsRunning.size === 1,
-      `running runs: ${rRunsRunning.size}`,
-    );
-  } finally {
-    await deleteTaskCompletely(db, queuedRef).catch(() => {});
-    await deleteTaskCompletely(db, recurringRef).catch(() => {});
-  }
-
-  const failed = results.filter((r) => !r.ok).length;
-  console.log(failed === 0 ? 'ALL TESTS PASSED' : `${failed} TEST(S) FAILED`);
-  process.exit(failed === 0 ? 0 : 1);
-}
-
-main().catch((e) => {
-  console.error('test error:', e instanceof Error ? e.message : String(e));
-  process.exit(1);
+  await t.test('a heartbeat committing after the expired query is not overwritten by the sweep', async () => {
+    const ref = await seedTask(db, 'sweep-race', {}, now);
+    const claim = await a.claimTask();
+    now = claim.leaseUntil;
+    // Model a heartbeat authorized just before expiry but committed after the
+    // sweep's candidate query. All subsequent reads/commits are real Firestore.
+    const pendingHeartbeat = make(claim.workerId, () => claim.leaseUntil - 1);
+    let injected = false;
+    function wrap(query, expiredQuery = false) {
+      return {
+        where: (field, op, value) => wrap(query.where(field, op, value), expiredQuery || field === 'leaseUntil'),
+        orderBy: (...args) => wrap(query.orderBy(...args), expiredQuery),
+        limit: (...args) => wrap(query.limit(...args), expiredQuery),
+        doc: (...args) => query.doc(...args),
+        get: async () => {
+          const snapshot = await query.get();
+          if (expiredQuery && !injected) {
+            injected = true;
+            assert.equal(await pendingHeartbeat.heartbeat(claim), true);
+          }
+          return snapshot;
+        },
+      };
+    }
+    const sweeper = make('sweeper', () => now, {
+      collection: (name) => wrap(db.collection(name)),
+      runTransaction: (...args) => db.runTransaction(...args),
+    });
+    assert.equal(await sweeper.sweepExpiredLeases(), 0);
+    assert.equal(injected, true);
+    assert.equal((await data(ref)).status, 'running');
+    assert.equal((await data(ref.collection('runs').doc(claim.runId))).status, 'running');
+    assert.equal((await ref.collection('events').get()).size, 1);
+    assert.equal(await a.settleInterrupted(claim, 'Test cleanup interruption.'), true);
+  });
 });

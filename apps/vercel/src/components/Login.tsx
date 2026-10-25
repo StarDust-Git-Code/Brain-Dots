@@ -63,7 +63,7 @@ export function Login() {
       >
         <div className="login-brand">OpenDots</div>
         <h1 className="login-title">Your second brain</h1>
-        <p className="login-sub">Sign in to reach your dots, pages, and tasks.</p>
+        <p className="login-sub">Sign in or create an account to start your second brain with Spaces, Dots, and Memories.</p>
         <label className="form-field">
           <span className="form-label">Email</span>
           <Input

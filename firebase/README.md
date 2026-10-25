@@ -10,7 +10,7 @@ NIM as the AI provider).
 | --- | --- |
 | `firebase.json` | Firebase CLI config — wires `firestore.rules` and `firestore.indexes.json` |
 | `firestore.rules` | Per-user isolation rules (deny-by-default) |
-| `firestore.indexes.json` | Composite index + field override definitions |
+| `firestore.indexes.json` | Nine composite indexes; ordinary single-field indexes remain automatic |
 
 ## Data model recap
 
@@ -87,7 +87,7 @@ Deploy from this folder (so `firebase.json` is picked up):
 
 ```bash
 cd firebase
-firebase deploy --only firestore:rules,firestore:indexes
+firebase deploy --only firestore:rules,firestore:indexes --project brain-dots-pvt
 ```
 
 One-liner equivalent (bash / PowerShell 7+):
@@ -148,12 +148,12 @@ needed locally.
   credential. Keep it out of git (add it to `.gitignore`), store it only in
   Vercel/Render environment settings or a secrets manager, and rotate the key
   immediately if it is ever exposed.
-- **Rules enforce per-user isolation.** Every top-level document must carry a
-  `userId` equal to the caller's uid: reads/updates/deletes require ownership,
-  and creates require stamping the caller's own uid. Subcollections
-  (`tasks/.../runs`, `tasks/.../events`, `conversations/.../messages`) are
-  protected by a parent-document ownership check. Everything not explicitly
-  allowed is denied by default.
+- **Rules enforce per-user reads.** Workspace documents carry their owner's
+  `userId`; messages, runs and events inherit ownership from their parent.
+  Workspace writes go through the Vercel API, which verifies Firebase ID tokens,
+  validates references and applies page revision checks. Clients cannot forge
+  worker leases, audit records or assistant messages. Profile documents remain
+  writable by their own Firebase UID. Other access is denied by default.
 - **Workers bypass rules by design.** The Render background workers use the
   Firebase Admin SDK with the service account, which ignores Firestore rules —
   that is intentional because workers are trusted server code (task claiming,

@@ -27,6 +27,7 @@ export const radius = {
 export const statusColor: Record<string, string> = {
   queued: colors.accent,
   running: colors.accent,
+  paused: colors.muted,
   completed: colors.ok,
   failed: colors.danger,
   interrupted: colors.muted,

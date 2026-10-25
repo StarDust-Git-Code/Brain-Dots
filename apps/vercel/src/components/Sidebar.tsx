@@ -12,10 +12,13 @@ interface SidebarProps {
   selectedDotId: string | null;
   selectedSpaceId: string | null;
   selectedView: AppView;
+  onSelectHome: () => void;
   onSelectDot: (dotId: string) => void;
   onNewDot: () => void;
   onEditDot: (dot: Dot) => void;
   onSelectSpace: (spaceId: string) => void;
+  onNewSpace: () => void;
+  onSelectMemories: () => void;
   onSelectTasks: () => void;
   onSignOut: () => void;
 }
@@ -28,10 +31,13 @@ export function Sidebar({
   selectedDotId,
   selectedSpaceId,
   selectedView,
+  onSelectHome,
   onSelectDot,
   onNewDot,
   onEditDot,
   onSelectSpace,
+  onNewSpace,
+  onSelectMemories,
   onSelectTasks,
   onSignOut,
 }: SidebarProps) {
@@ -39,11 +45,16 @@ export function Sidebar({
     <aside className="sidebar">
       <div className="sidebar-brand">OpenDots</div>
 
+      <nav className="sidebar-section" aria-label="Second brain">
+        <button className={`sidebar-item sidebar-tasks${selectedView === 'home' ? ' active' : ''}`} aria-current={selectedView === 'home' ? 'page' : undefined} onClick={onSelectHome}>Home</button>
+        <button className={`sidebar-item sidebar-tasks${selectedView === 'memories' ? ' active' : ''}`} aria-current={selectedView === 'memories' ? 'page' : undefined} onClick={onSelectMemories}>Memories</button>
+      </nav>
+
       <section className="sidebar-section">
         <div className="sidebar-section-head">
           <span className="sidebar-label">Dots</span>
           <button className="sidebar-add" onClick={onNewDot}>
-            + New Dot
+            + Create Dot
           </button>
         </div>
         {dots.length === 0 ? (
@@ -80,6 +91,7 @@ export function Sidebar({
       <section className="sidebar-section">
         <div className="sidebar-section-head">
           <span className="sidebar-label">Spaces</span>
+          <button className="sidebar-add" onClick={onNewSpace}>+ Create Space</button>
         </div>
         {spaces.length === 0 ? (
           <p className="sidebar-empty">No spaces yet.</p>

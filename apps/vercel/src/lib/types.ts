@@ -1,6 +1,7 @@
 export type TaskStatus =
   | 'queued'
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'interrupted'
@@ -85,6 +86,7 @@ export interface Task {
   workerId: string | null;
   lease: string | null;
   leaseUntil: number | null;
+  runId?: string | null;
   createdAt: number;
   updatedAt: number;
   error: string | null;
