@@ -106,6 +106,12 @@ Exactly-once retries require backend support.
 
 ## Android APK builds
 
+**Built APK:** [Download Brain-Dots for Android](https://expo.dev/artifacts/eas/-wYSiKuRXH_Wwp3fjBi-jQk1lcbjREafw2H9fy6nKSw.apk)
+— approximately 65 MB. The EAS preview build finished and the download returned
+HTTP 200 with a valid APK/ZIP archive header. See
+[deployment verification](../../docs/BRAIN-DOTS-VERIFICATION.md) for the build and
+live-test details. Physical-device installation remains a device-side check.
+
 The app is linked to **@star_dust_911/brain-dots**, EAS project
 `217a9716-d82b-499f-9b23-b993adfc3534`. Its Android application ID is
 `com.stardust.braindots`; the `preview` profile creates an installable APK.

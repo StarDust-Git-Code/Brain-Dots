@@ -7,6 +7,8 @@ workers and NVIDIA NIM**.
 - **Deployment guide:** [ARCHITECTURE-NEW.md](ARCHITECTURE-NEW.md)
 - **Service roots:** `apps/vercel`, `workers/render-1`, `workers/render-2`.
 - **Mobile companion:** [apps/mobile/README.md](apps/mobile/README.md).
+- **Android APK:** [Download Brain-Dots](https://expo.dev/artifacts/eas/-wYSiKuRXH_Wwp3fjBi-jQk1lcbjREafw2H9fy6nKSw.apk).
+- **Verified deployments and checks:** [docs/BRAIN-DOTS-VERIFICATION.md](docs/BRAIN-DOTS-VERIFICATION.md).
 
 Use those service directories for the Brain-Dots deployment. The OpenDots source
 and documentation below provide the upstream reference and attribution.
