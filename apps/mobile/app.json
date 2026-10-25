@@ -25,10 +25,10 @@
         "projectId": ""
       },
       "firebase": {
-        "apiKey": "PASTE_YOUR_FIREBASE_API_KEY",
-        "authDomain": "PASTE_YOUR_PROJECT.firebaseapp.com",
-        "projectId": "PASTE_YOUR_PROJECT_ID",
-        "appId": "PASTE_YOUR_FIREBASE_APP_ID"
+        "apiKey": "AIzaSyALRu24cp-2IzU2S8DMPuMgue1MD_X6xF4",
+        "authDomain": "brain-dots-pvt.firebaseapp.com",
+        "projectId": "brain-dots-pvt",
+        "appId": "1:4686168926:web:c9985842b8a44912efc5cf"
       }
     }
   }
