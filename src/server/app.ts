@@ -71,8 +71,10 @@ export function createApp({
     if (c.req.header('sec-fetch-site') === 'cross-site')
       return c.json({ error: 'Cross-site requests are not allowed.' }, 403);
     // Deployment probes and keep-alive pings carry no owner token; they only
-    // learn that the process is alive.
-    if (requestUrl.pathname === '/healthz') return c.json({ status: 'ok' });
+    // learn that the process is alive. `/api/health` answers services whose
+    // health check was configured for an older app on the same slot.
+    if (['/healthz', '/api/health'].includes(requestUrl.pathname))
+      return c.json({ status: 'ok' });
     if (ownerToken) {
       const expected = Buffer.from(ownerToken);
       const supplied = Buffer.from(
