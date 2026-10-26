@@ -456,21 +456,6 @@ export function Chat({
           </div>
         )}
         <div className="chat-compose-row">
-          {(models ?? []).length > 1 && (
-            <select
-              className="chat-model-select"
-              aria-label="Chat model"
-              title="Model for this conversation"
-              value={selectedModel}
-              onChange={(e) => setModel(e.target.value)}
-            >
-              {(models ?? []).map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          )}
           <button
             type="button"
             className="icon-button"
@@ -513,9 +498,26 @@ export function Chat({
           )}
         </div>
         <div className="chat-compose-note">
-          {voiceReady
-            ? 'Text and voice, one conversation.'
-            : 'Text is ready. Voice needs separate server configuration.'}
+          {(models ?? []).length > 1 && (
+            <select
+              className="chat-model-select"
+              aria-label="Chat model"
+              title="Model for this conversation"
+              value={selectedModel}
+              onChange={(e) => setModel(e.target.value)}
+            >
+              {(models ?? []).map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          )}
+          <span>
+            {voiceReady
+              ? 'Text and voice, one conversation.'
+              : 'Text is ready. Voice needs separate server configuration.'}
+          </span>
         </div>
       </form>
     </div>
