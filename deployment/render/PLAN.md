@@ -202,6 +202,45 @@ Deployment gotchas hit and fixed:
 Owner access: UI unlock token at temp `render-owner-token.txt` (line 1).
 Render keys used in chat must be rotated (both accounts).
 
+## Per-chat model picker (2026-10-26)
+
+- Catalog: `src/shared/chat-models.ts` builds from env at boot.
+  `default` = `OPENAI_MODEL` at `OPENAI_BASE_URL` (NVIDIA MiniMax);
+  `gemini-flash` / `gemini-pro` added automatically when `VOICE_API_KEY`
+  exists (Google OpenAI-compatible endpoint); any further
+  OpenAI-compatible provider via `CHAT_MODELS` JSON
+  (`[{id,label,model,baseUrl,apiKeyEnv}]`, ids lowercase, invalid
+  catalogs throw at boot by design).
+- Storage: `thread_bindings.model` column (workspace migration list);
+  `PATCH /api/conversations/:id {model|null}`, optional `model` on
+  `POST /api/conversations`, `GET /api/models` lists the catalog.
+  Unknown model ids → 400; `dot-agent.ts` resolves the conversation's
+  model into the tanstack adapter per run.
+- UI: model `<select>` lives in the composer note row (below the input,
+  centered pill; deliberately NOT inside the compose row after a
+  placement complaint). List loads once in `App` via `/api/models` and
+  is passed to `Chat` as a prop — a mount-time fetch inside `Chat`
+  broke api-mock ordering in `chat-run-error.test.tsx`.
+- Cloud catalog: 18 options — default MiniMax, 2 Gemini, plus the
+  NVIDIA free-endpoint chat models shipped via `CHAT_MODELS` on the
+  service env (Nemotron Bolt/Super VL/Ultra/Lightning, Step 5 Preview,
+  DeepSeek V4.1 Flash, GLM 5.3 Flash, Kimi K2.6, Muse Glimmer 30B,
+  Laguna XS 2.1, DiffusionGemma 26B, Gemma 4 31B, GPT-OSS 20B,
+  Llama 3.2 90B Vision, Mistral Large 2). `z-ai/glm-5.3` excluded
+  (upper-listed deprecation in 2 days).
+- Tests: `tests/chat-models.test.ts` (catalog resolution, malformed
+  `CHAT_MODELS`, per-thread override persistence).
+
+## Persistence decision (deferred)
+
+Approved plan: **Supabase Storage snapshot** backup/restore
+(snapshot `store.db` to a Supabase bucket on a schedule, restore on
+boot when the disk is empty). Free tier, no credit card. Chosen over
+GitHub-repo snapshots; Turso (libSQL) noted as the eventual zero-loss
+end-state; Firebase Storage needs Blaze (card) so it lost. Implement
+before relying on the cloud for real data — until then every deploy
+(eploy includes env-only changes) wipes the database.
+
 ## Owner checklist (nothing in chat)
 
 - [ ] `.env.render` with the 5 Render keys (git-ignored first).
