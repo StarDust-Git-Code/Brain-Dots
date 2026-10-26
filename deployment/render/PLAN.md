@@ -151,6 +151,57 @@ GITHUB_BACKUP_PAT=…
 5. Second-brain loop: Spaces as knowledge store, scheduled daily Telegram
    digest, memory on all Dots.
 
+## Cloud app deployment (2026-10-26)
+
+- Account 2 (`Another Star_Dust's workspace`, key saved as `RENDER_APP_KEY`
+  in git-ignored temp `.env.render`): single service `opendots-worker-2`
+  (`srv-dbesm53ncjis73fb04b0`), Node runtime, region singapore,
+  https://opendots-worker-2.onrender.com — repurposed as the main app.
+- Code ships from `StarDust-Git-Code/Brain-Dots` branch **`opendots-app`**
+  (that repo's `main` holds the owner's separate mobile/Firebase project and
+  must NOT be force-pushed over; the app lives on its own branch).
+- Free-tier instances have 512 MB, too tight for `vite build` on-instance,
+  so `dist/` (client + server) is prebuilt locally and committed; Render
+  build stays `npm ci --omit=dev`, start `npm start`; Node pinned via
+  `.nvmrc` ("22") + `NODE_VERSION` env.
+- App env: secrets were PUSHED from the local git-ignored `.env` by script
+  (`deploy-app.mjs`, names only printed in chat): CPK intelligence key,
+  NVIDIA chat (`OPENAI_*`), voice (`VOICE_*`, gemini), `COMPUTER_TOKEN`
+  master + `COMPUTER_REMOTES` (box-1) so the cloud app can drive Render
+  boxes, `HOST=0.0.0.0`, and a generated `OWNER_TOKEN` (required by the
+  app for external binding; stored at temp `render-owner-token.txt`,
+  never pasted in chat).
+- App additions for deployment: public `/healthz` + `/api/health` probes
+  (exempt from the owner-token gate; the latter answers services whose
+  health check predates this app and unblocks Render's deploy probe).
+
+Verified live: cloud app ⇄ box-1 — status (`running`), `exec`
+(`echo cloud-app-to-box` on the box pod) and egress-policy auto-push all
+work through `https://opendots-worker-2.onrender.com` with the owner token;
+box-1 auth switched to the per-box token pattern (`COMPUTER_TOKEN` = fixed
+secret, sent via the `token` field of `COMPUTER_REMOTES` on both apps).
+
+Deployment gotchas hit and fixed:
+
+- service had a stale Root Directory `render-2` → cleared (instant
+  build failures were invisible without logs);
+- service health check pointed at `/api/health` from a previous app → the
+  app now answers that path directly;
+- `ownerToken` scripts must read the temp token file BY LINE (the file has
+  a trailing note line; a whole-file `.trim()` pushed the note into the env
+  value and broke auth until rotated);
+- behind Render's TLS proxy the app sees itself as `http://`, so POSTs
+  carrying `Origin: https://...` 403'd ("Cross-origin requests are not
+  allowed") while GETs passed — UI loaded but chat sends failed; fixed by
+  setting `APP_ORIGIN=https://opendots-worker-2.onrender.com` on the
+  service (must stay in the env for every future app deploy);
+- free tier = ephemeral disk: every redeploy wipes SQLite and reseeds ONE
+  new default Dot (ids change each deploy). No redeploys after this point
+  until the backup/restore (`restore.mjs`) or a persistent disk is in place.
+
+Owner access: UI unlock token at temp `render-owner-token.txt` (line 1).
+Render keys used in chat must be rotated (both accounts).
+
 ## Owner checklist (nothing in chat)
 
 - [ ] `.env.render` with the 5 Render keys (git-ignored first).
