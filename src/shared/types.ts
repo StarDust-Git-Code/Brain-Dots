@@ -12,6 +12,8 @@ export interface Settings {
   researchAllowed: boolean;
   memoryAllowed: boolean;
   appsAllowed: boolean;
+  /** Persisted call-voice override; null/undefined uses VOICE_NAME (or provider default). */
+  voiceName?: string | null;
 }
 export interface Task {
   id: string;

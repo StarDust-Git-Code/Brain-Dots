@@ -10,6 +10,7 @@ import { configured, type Config } from './research.js';
 import type { Platform } from './platform.js';
 import { VoiceService } from './voice.js';
 import { workspaceRoutes } from './workspace-routes.js';
+import { GEMINI_VOICE_SET } from '../shared/voices.js';
 const interval = z.number().int().min(60).max(31_536_000).nullable();
 export interface AppOptions {
   store: Store;
@@ -69,6 +70,9 @@ export function createApp({
       return c.json({ error: 'Cross-origin requests are not allowed.' }, 403);
     if (c.req.header('sec-fetch-site') === 'cross-site')
       return c.json({ error: 'Cross-site requests are not allowed.' }, 403);
+    // Deployment probes and keep-alive pings carry no owner token; they only
+    // learn that the process is alive.
+    if (requestUrl.pathname === '/healthz') return c.json({ status: 'ok' });
     if (ownerToken) {
       const expected = Buffer.from(ownerToken);
       const supplied = Buffer.from(
@@ -191,10 +195,21 @@ export function createApp({
         researchAllowed: z.boolean().optional(),
         memoryAllowed: z.boolean().optional(),
         appsAllowed: z.boolean().optional(),
+        voiceName: z.string().trim().nullable().optional(),
       })
       .strict()
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'Invalid settings.' }, 400);
+    if (parsed.data.voiceName) {
+      const provider = platform?.config.voiceProvider ?? 'openai';
+      if (provider !== 'gemini')
+        return c.json(
+          { error: 'Call voice selection requires the Gemini voice provider.' },
+          400,
+        );
+      if (!GEMINI_VOICE_SET.has(parsed.data.voiceName))
+        return c.json({ error: 'Pick one of the available call voices.' }, 400);
+    }
     const previous = store.settings();
     const settings = store.updateSettings(parsed.data);
     if (

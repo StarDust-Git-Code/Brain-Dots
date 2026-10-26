@@ -1,9 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, authHeaders } from './api';
+import {
+  addAudioWorklet,
+  base64Pcm,
+  CAPTURE_WORKLET,
+  geminiSetupMessage,
+  PLAYBACK_WORKLET,
+  pcmBase64,
+  type GeminiServerMessage,
+} from './gemini-voice';
 // A single failed control poll is usually a network flap, not a dead call.
 // Only treat the control connection as lost after this many consecutive
 // poll failures, mirroring the grace period #26 gives the peer connection.
 const CONTROL_POLL_FAILURE_LIMIT = 3;
+// One session shape with provider-specific optional fields so both the
+// OpenAI Realtime WebRTC flow and the Gemini Live WebSocket flow share the
+// transcript, control poll, and teardown paths.
+type VoiceSession = {
+  stream: MediaStream;
+  transcript: string[];
+  cancelled: boolean;
+  id?: string;
+  timer?: ReturnType<typeof setTimeout>;
+  disconnectTimer?: ReturnType<typeof setTimeout>;
+  controlPollFailures: number;
+  // OpenAI Realtime WebRTC flow.
+  pc?: RTCPeerConnection;
+  channel?: RTCDataChannel;
+  audio?: HTMLAudioElement;
+  // Gemini Live WebSocket flow.
+  ws?: WebSocket;
+  inputCtx?: AudioContext;
+  outputCtx?: AudioContext;
+  gain?: GainNode;
+  spoken?: string;
+};
 export function useVoice(
   threadId: string,
   onSaved: () => void,
@@ -24,21 +55,7 @@ export function useVoice(
   );
   const [caption, setCaption] = useState('');
   const [userCaption, setUserCaption] = useState('');
-  const session = useRef<
-    | {
-        pc: RTCPeerConnection;
-        stream: MediaStream;
-        audio: HTMLAudioElement;
-        id?: string;
-        channel: RTCDataChannel;
-        transcript: string[];
-        timer?: ReturnType<typeof setTimeout>;
-        controlPollFailures: number;
-        disconnectTimer?: ReturnType<typeof setTimeout>;
-        cancelled: boolean;
-      }
-    | undefined
-  >(undefined);
+  const session = useRef<VoiceSession | undefined>(undefined);
   const anchor = useRef(anchorMessageId);
   anchor.current = anchorMessageId;
   const closeMedia = useCallback(() => {
@@ -46,10 +63,15 @@ export function useVoice(
     if (!current) return;
     current.cancelled = true;
     current.stream.getTracks().forEach((track) => track.stop());
-    current.channel.close();
-    current.pc.close();
-    current.audio.pause();
-    current.audio.srcObject = null;
+    current.channel?.close();
+    current.pc?.close();
+    current.ws?.close();
+    if (current.audio) {
+      current.audio.pause();
+      current.audio.srcObject = null;
+    }
+    void current.inputCtx?.close().catch(() => {});
+    void current.outputCtx?.close().catch(() => {});
     clearTimeout(current.timer);
     clearTimeout(current.disconnectTimer);
   }, []);
@@ -68,7 +90,8 @@ export function useVoice(
     current.stream.getTracks().forEach((track) => {
       track.enabled = false;
     });
-    current.audio.pause();
+    current.audio?.pause();
+    current.ws?.close();
     clearTimeout(current.timer);
     clearTimeout(current.disconnectTimer);
     ending.current = true;
@@ -137,6 +160,241 @@ export function useVoice(
     }, 2000);
     return () => clearInterval(timer);
   }, [status, closeMedia, onSaved, end]);
+  const startGemini = async (attempt: number, stream: MediaStream) => {
+    // The model answers with 24 kHz native audio; the capture worklet
+    // decimates the microphone down to the 16 kHz Live API input format.
+    const outputCtx = new AudioContext({ sampleRate: 24000 });
+    const inputCtx = new AudioContext();
+    let sessionId: string | undefined;
+    try {
+      await addAudioWorklet(inputCtx, CAPTURE_WORKLET);
+      await addAudioWorklet(outputCtx, PLAYBACK_WORKLET);
+      const capture = new AudioWorkletNode(inputCtx, 'opendots-pcm-capture', {
+        numberOfOutputs: 0,
+      });
+      const playback = new AudioWorkletNode(
+        outputCtx,
+        'opendots-pcm-playback',
+        {
+          numberOfInputs: 0,
+          outputChannelCount: [1],
+        },
+      );
+      const gain = outputCtx.createGain();
+      inputCtx.createMediaStreamSource(stream).connect(capture);
+      playback.connect(gain);
+      gain.connect(outputCtx.destination);
+      const begin = await api<{
+        id: string;
+        provider: 'gemini';
+        token: string;
+        model: string;
+        voice: string;
+        instructions: string;
+      }>('/voice/calls', 'POST', { threadId });
+      if (attempt !== generation.current) {
+        await api(`/voice/calls/${begin.id}/end`, 'POST', {
+          transcript: '',
+        }).catch(() => {});
+        return;
+      }
+      sessionId = begin.id;
+      await Promise.allSettled([inputCtx.resume(), outputCtx.resume()]);
+      const ws = new WebSocket(
+        `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(begin.token)}`,
+      );
+      ws.binaryType = 'arraybuffer';
+      const frameText = new TextDecoder();
+      const current: VoiceSession = {
+        stream,
+        transcript: [],
+        cancelled: false,
+        id: begin.id,
+        controlPollFailures: 0,
+        ws,
+        inputCtx,
+        outputCtx,
+        gain,
+      };
+      session.current = current;
+      const sendInputAudio = (samples: Float32Array) => {
+        if (current.cancelled || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(
+          JSON.stringify({
+            realtimeInput: {
+              audio: {
+                data: pcmBase64(samples),
+                mimeType: 'audio/pcm;rate=16000',
+              },
+            },
+          }),
+        );
+      };
+      capture.port.onmessage = (event) => {
+        if (current.cancelled) return;
+        sendInputAudio(event.data as Float32Array);
+      };
+      const handleToolCall = (message: GeminiServerMessage) => {
+        const calls = message.toolCall?.functionCalls ?? [];
+        if (!calls.length || !current.id || current.cancelled) return;
+        void (async () => {
+          const responses: Array<{
+            id: string;
+            response: Record<string, unknown>;
+          }> = [];
+          for (const call of calls) {
+            if (call.name !== 'ask_compute' || typeof call.id !== 'string')
+              continue;
+            setPhase('thinking');
+            let output: string;
+            try {
+              const request = (call.args as { request?: unknown } | undefined)
+                ?.request;
+              if (typeof request !== 'string' || !request.trim())
+                throw new Error('Invalid compute request.');
+              const result = await api<{ text: string }>(
+                `/voice/calls/${current.id}/compute`,
+                'POST',
+                {
+                  toolCallId: call.id,
+                  request,
+                  transcript: current.transcript.join('\n').slice(-12000),
+                },
+              );
+              output = result.text;
+            } catch (e) {
+              output = `Compute failed: ${e instanceof Error ? e.message : 'Unknown error'}`;
+            }
+            responses.push({ id: call.id, response: { result: output } });
+          }
+          if (
+            !current.cancelled &&
+            responses.length &&
+            ws.readyState === WebSocket.OPEN
+          )
+            ws.send(
+              JSON.stringify({
+                toolResponse: {
+                  functionResponses: responses.map(({ id, response }) => ({
+                    id,
+                    name: 'ask_compute',
+                    response,
+                  })),
+                },
+              }),
+            );
+        })();
+      };
+      ws.onopen = () => {
+        if (current.cancelled) return;
+        ws.send(
+          geminiSetupMessage(begin.model, begin.voice, begin.instructions),
+        );
+      };
+      ws.onmessage = (event) => {
+        if (current.cancelled) return;
+        let message: GeminiServerMessage;
+        try {
+          const raw =
+            typeof event.data === 'string'
+              ? event.data
+              : frameText.decode(new Uint8Array(event.data));
+          const parsed: unknown = JSON.parse(raw);
+          if (!parsed || typeof parsed !== 'object') return;
+          message = parsed as GeminiServerMessage;
+        } catch {
+          return;
+        }
+        if (message.setupComplete) {
+          setStatus('active');
+          setStartedAt((value) => value ?? Date.now());
+          void api(`/voice/calls/${current.id}/active`, 'POST', {}).catch(
+            (e) => {
+              if (!current.cancelled) setError(e.message);
+            },
+          );
+        }
+        if (message.error)
+          setError(
+            'The voice provider reported a session error. End the call and retry.',
+          );
+        const content = message.serverContent;
+        if (content) {
+          if (content.interrupted) {
+            setPhase('listening');
+            setCaption('');
+            current.spoken = '';
+            playback.port.postMessage({ reset: true });
+          }
+          for (const part of content.modelTurn?.parts ?? []) {
+            const audio = part.inlineData?.data;
+            if (!audio) continue;
+            setPhase('speaking');
+            playback.port.postMessage({ samples: base64Pcm(audio) });
+          }
+          const heard = content.inputTranscription?.text;
+          if (heard) {
+            setCaption('');
+            setUserCaption(heard);
+            if (
+              heard !==
+              current.transcript[current.transcript.length - 1]?.slice(5)
+            )
+              current.transcript.push(`You: ${heard}`);
+          }
+          const spoken = content.outputTranscription?.text;
+          if (spoken) {
+            current.spoken = (current.spoken ?? '') + spoken;
+            setPhase('speaking');
+            setCaption(current.spoken);
+          }
+          if (content.turnComplete) {
+            setPhase('listening');
+            if (current.spoken) {
+              current.transcript.push(`Dot: ${current.spoken}`);
+              current.spoken = '';
+            }
+            setCaption('');
+          }
+        }
+        handleToolCall(message);
+      };
+      ws.onerror = () => {
+        if (current.cancelled || session.current !== current) return;
+        setError(
+          'The voice provider reported a session error. End the call and retry.',
+        );
+      };
+      ws.onclose = () => {
+        if (current.cancelled || session.current !== current) return;
+        setError('The voice connection dropped.');
+        void end();
+      };
+      current.timer = setTimeout(() => void end(), 15 * 60_000);
+    } catch (e) {
+      if (attempt !== generation.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        void inputCtx.close().catch(() => {});
+        void outputCtx.close().catch(() => {});
+        return;
+      }
+      const id = session.current?.id ?? sessionId;
+      if (id)
+        void api(`/voice/calls/${id}/end`, 'POST', {
+          transcript: '',
+          anchorMessageId: anchor.current,
+        }).catch(() => {});
+      stream.getTracks().forEach((track) => track.stop());
+      void inputCtx.close().catch(() => {});
+      void outputCtx.close().catch(() => {});
+      closeMedia();
+      session.current = undefined;
+      setStatus('idle');
+      setError(e instanceof Error ? e.message : 'Could not connect the call.');
+    } finally {
+      if (attempt === generation.current) connecting.current = false;
+    }
+  };
   const start = async () => {
     if (session.current || connecting.current || ending.current) return;
     connecting.current = true;
@@ -154,6 +412,17 @@ export function useVoice(
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (attempt !== generation.current) {
         stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const detected = await api<{ provider: 'openai' | 'gemini' }>(
+        '/voice/provider',
+      );
+      if (attempt !== generation.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      if (detected.provider === 'gemini') {
+        await startGemini(attempt, stream);
         return;
       }
       const pc = new RTCPeerConnection();
@@ -345,7 +614,9 @@ export function useVoice(
   };
   const toggleSpeaker = () => {
     const next = !speakerMuted;
-    if (session.current) session.current.audio.muted = next;
+    const current = session.current;
+    if (current?.gain) current.gain.gain.value = next ? 0 : 1;
+    else if (current?.audio) current.audio.muted = next;
     setSpeakerMuted(next);
   };
   return {

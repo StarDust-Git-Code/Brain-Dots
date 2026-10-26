@@ -11,7 +11,10 @@ const stores: WorkspaceStore[] = [];
 afterEach(() => {
   for (const store of stores.splice(0)) store.close();
 });
-function fixture(deadline = 1000) {
+function fixture(
+  deadline = 1000,
+  overrides: Partial<ConstructorParameters<typeof ComputerService>[1]> = {},
+) {
   const workspace = new WorkspaceStore(':memory:', 'owner');
   stores.push(workspace);
   const id = workspace.dots()[0].id;
@@ -59,6 +62,7 @@ function fixture(deadline = 1000) {
     computerSupervisorUrl: 'http://127.0.0.1:4312',
     computerSupervisorToken: 'supervisor-secret',
     computerToken: 'master-secret',
+    ...overrides,
   };
   const service = new ComputerService(
     workspace,
@@ -304,4 +308,84 @@ it('gives agents a safe recovery instruction for stale browser or control confli
     f.service.action(f.id, 'navigate', { url: 'https://example.com' }, 'agent'),
   ).rejects.not.toThrow(f.config.computerToken);
   expect(f.workspace.computers.audit(f.id)[0].outcome).toBe('failed');
+});
+
+it('routes each Dot to its assigned box, falling back to the first one', async () => {
+  const f = fixture(1000, {
+    computerRemotes: [
+      { name: 'box-1', url: 'https://box1.example.com' },
+      { name: 'box-2', url: 'https://box2.example.com' },
+    ],
+  });
+  // Unassigned Dots route to the first configured box.
+  await f.service.action(f.id, 'files_read', { path: 'note.txt' });
+  expect(f.calls.at(-1)?.url).toBe('https://box1.example.com/files/read');
+  const status = await f.service.status(f.id);
+  expect(status.assignment).toBeNull();
+  expect(status.remotes).toEqual(['box-1', 'box-2']);
+  // The credential stays per-Dot when the box has no token of its own.
+  expect(new Headers(f.calls.at(-1)?.init?.headers).get('authorization')).toBe(
+    `Bearer ${createHmac('sha256', 'master-secret').update(`opendots-computer:${f.id}`).digest('hex')}`,
+  );
+  await f.service.assignment(f.id, { remote: 'box-2' });
+  expect((await f.service.status(f.id)).assignment).toBe('box-2');
+  await f.service.action(f.id, 'files_read', { path: 'note.txt' });
+  expect(f.calls.at(-1)?.url).toBe('https://box2.example.com/files/read');
+  await expect(f.service.assignment(f.id, { remote: 'ghost' })).rejects.toThrow(
+    'Unknown computer remote',
+  );
+  // Clearing the pin falls back to the default box again.
+  await f.service.assignment(f.id, { remote: null });
+  expect((await f.service.status(f.id)).assignment).toBeNull();
+  await f.service.action(f.id, 'files_read', { path: 'note.txt' });
+  expect(f.calls.at(-1)?.url).toBe('https://box1.example.com/files/read');
+});
+
+it('sends the box token when a remote defines one, per Dot otherwise', async () => {
+  const f = fixture(1000, {
+    computerRemotes: [
+      { name: 'box-1', url: 'https://box1.example.com', token: 'box-secret' },
+      { name: 'box-2', url: 'https://box2.example.com' },
+    ],
+  });
+  await f.service.action(f.id, 'files_read', { path: 'note.txt' });
+  expect(new Headers(f.calls.at(-1)?.init?.headers).get('authorization')).toBe(
+    'Bearer box-secret',
+  );
+  await f.service.assignment(f.id, { remote: 'box-2' });
+  await f.service.action(f.id, 'files_read', { path: 'note.txt' });
+  expect(new Headers(f.calls.at(-1)?.init?.headers).get('authorization')).toBe(
+    `Bearer ${createHmac('sha256', 'master-secret').update(`opendots-computer:${f.id}`).digest('hex')}`,
+  );
+});
+
+it('falls back to the first box when the assigned one is no longer configured', async () => {
+  const f = fixture(1000, {
+    computerRemotes: [
+      { name: 'box-1', url: 'https://box1.example.com' },
+      { name: 'box-2', url: 'https://box2.example.com' },
+    ],
+  });
+  await f.service.assignment(f.id, { remote: 'box-2' });
+  f.config.computerRemotes = [
+    { name: 'box-1', url: 'https://box1.example.com' },
+  ];
+  await f.service.action(f.id, 'files_read', { path: 'note.txt' });
+  expect(f.calls.at(-1)?.url).toBe('https://box1.example.com/files/read');
+});
+
+it('persists the box assignment across restart and clears it on null', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'computers-assign-'));
+  const path = join(dir, 'db');
+  let workspace = new WorkspaceStore(path, 'owner');
+  const id = workspace.dots()[0].id;
+  expect(workspace.computers.assignment(id)).toBeNull();
+  workspace.computers.assign(id, 'box-2');
+  workspace.close();
+  workspace = new WorkspaceStore(path, 'owner');
+  expect(workspace.computers.assignment(id)).toBe('box-2');
+  workspace.computers.assign(id, null);
+  expect(workspace.computers.assignment(id)).toBeNull();
+  workspace.close();
+  rmSync(dir, { recursive: true });
 });

@@ -8,7 +8,7 @@ import {
   type ComputerStatus,
 } from '../shared/computer-types.js';
 import type { WorkspaceStore } from './workspace.js';
-import type { PlatformConfig } from './platform-config.js';
+import type { ComputerRemote, PlatformConfig } from './platform-config.js';
 const stateSchema = z.object({
   botId: z.string(),
   container: z.string(),
@@ -24,6 +24,13 @@ const controlSchema = z.object({
   request: z.object({ id: z.string(), status: z.string() }).optional(),
 });
 export class ComputerService {
+  /**
+   * When the app last installed each Dot's egress policy on a remote stack.
+   * Remote boxes keep policies in memory, so a cold start (free tiers idle
+   * out after ~15 minutes) drops them; before acting we re-push when stale.
+   */
+  private remotePolicies = new Map<string, number>();
+
   constructor(
     private workspace: WorkspaceStore,
     private config: PlatformConfig,
@@ -33,15 +40,69 @@ export class ComputerService {
   ) {}
   get configured() {
     return !!(
-      this.config.computerSupervisorUrl?.trim() &&
-      this.config.computerSupervisorToken?.trim() &&
-      this.config.computerToken?.trim()
+      (this.config.computerSupervisorUrl?.trim() &&
+        this.config.computerSupervisorToken?.trim() &&
+        this.config.computerToken?.trim()) ||
+      (this.config.computerToken?.trim() &&
+        !!this.config.computerRemotes?.length)
     );
+  }
+  /**
+   * The remote stack a Dot runs on. Explicit assignment wins; a Dot whose
+   * assigned box is no longer configured falls back to the first remote.
+   * There is no hash-based default: boxes authorize one fixed secret, so a
+   * Dot may only run where its token is valid.
+   */
+  private remoteFor(id: string) {
+    if (
+      !this.config.computerRemotes?.length ||
+      !this.config.computerToken?.trim()
+    )
+      return undefined;
+    const name = this.workspace.computers.assignment(id);
+    const assigned = name
+      ? this.config.computerRemotes.find((remote) => remote.name === name)
+      : undefined;
+    return assigned ?? this.config.computerRemotes[0];
+  }
+  private remoteOrigin(id: string) {
+    const remote = this.remoteFor(id);
+    if (!remote) throw new Error('Computer service is not configured.');
+    return remote.url;
+  }
+  /**
+   * The credential this Dot presents to its box: the box's own token when one
+   * is configured, else the per-Dot derived HMAC token.
+   */
+  private remoteToken(remote: ComputerRemote | undefined, id: string) {
+    const boxToken = remote?.token?.trim();
+    return boxToken || this.token(id);
   }
   private token(id: string) {
     return createHmac('sha256', this.config.computerToken!.trim())
       .update(`opendots-computer:${id}`)
       .digest('hex');
+  }
+  /**
+   * A remote box refuses browser and shell network traffic until a policy
+   * arrives (upstream deploys push one "before it acts and whenever the
+   * computer wakes"). Free tiers spin unattended boxes down, so the push is
+   * repeated when it may have been lost to a cold start.
+   */
+  private async ensureRemotePolicy(id: string, signal?: AbortSignal) {
+    const remote = this.remoteFor(id);
+    if (!remote) return;
+    const installed = this.remotePolicies.get(id) ?? 0;
+    if (Date.now() - installed < 300_000) return;
+    await this.json(
+      `${remote.url}/egress-policy`,
+      this.remoteToken(remote, id),
+      { policy: { mode: 'allow_all' } },
+      signal,
+      id,
+      'PUT',
+    );
+    this.remotePolicies.set(id, Date.now());
   }
   private requireDot(id: string) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || !this.workspace.dot(id))
@@ -67,15 +128,17 @@ export class ComputerService {
     body: unknown | undefined,
     signal?: AbortSignal,
     dotId?: string,
+    method?: 'POST' | 'PUT',
   ): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.deadlineMs);
+
     const combined = signal
       ? AbortSignal.any([signal, controller.signal])
       : controller.signal;
     try {
       const response = await this.transport(url, {
-        method: body === undefined ? 'GET' : 'POST',
+        method: method ?? (body === undefined ? 'GET' : 'POST'),
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
@@ -190,6 +253,9 @@ export class ComputerService {
     return listing.computers.find((c) => c.botId === id);
   }
   private async running(id: string, signal?: AbortSignal) {
+    // Remote stacks return their origin as a plain string: a URL object would
+    // stringify with a trailing slash and double the action's leading one.
+    if (this.remoteFor(id)) return this.remoteOrigin(id);
     const state = await this.existing(id, signal);
     if (!state || state.status !== 'running')
       throw new Error('Start this Dot’s computer first.');
@@ -204,6 +270,27 @@ export class ComputerService {
     };
     if (!this.configured) return { ...base, state: 'not_configured' };
     try {
+      if (this.remoteFor(id)) {
+        // Keep the egress policy installed even for UI polling: the first
+        // request after a cold start is often a status check, and a silent
+        // push there spares actions a surprise 502.
+        this.ensureRemotePolicy(id).catch(() => {});
+        return {
+          ...base,
+          state: 'running',
+          assignment: this.workspace.computers.assignment(id),
+          remotes: this.config.computerRemotes?.map((remote) => remote.name),
+          control: controlSchema.parse(
+            await this.json(
+              `${this.remoteOrigin(id)}/control`,
+              this.remoteToken(this.remoteFor(id), id),
+              undefined,
+              undefined,
+              id,
+            ),
+          ),
+        };
+      }
       const state = await this.existing(id);
       if (!state || state.status !== 'running')
         return { ...base, state: 'stopped' };
@@ -253,6 +340,14 @@ export class ComputerService {
   }
   async start(id: string) {
     await this.audited(id, 'start', 'owner', async () => {
+      if (this.remoteFor(id)) {
+        // A remote stack is always provisioned; a health check proves the box
+        // is awake and the origin is the one the configuration named.
+        this.allowed(id, undefined, 'owner');
+        await this.json(`${this.remoteOrigin(id)}/health`, '', undefined);
+        await this.ensureRemotePolicy(id);
+        return;
+      }
       this.allowed(id, undefined, 'owner');
       this.endpoint(id, await this.supervisor(`/computers/${id}/ensure`, {}));
     });
@@ -262,7 +357,39 @@ export class ComputerService {
     await this.audited(id, 'stop', 'owner', async () => {
       if (!this.configured)
         throw new Error('Computer service is not configured.');
+      if (this.remoteFor(id)) {
+        // Stops the browser session on the box; the Render service itself
+        // keeps serving so files and profiles survive.
+        await this.json(
+          `${this.remoteOrigin(id)}/computers/stop`,
+          this.remoteToken(this.remoteFor(id), id),
+          {},
+          undefined,
+          id,
+        );
+        return;
+      }
       await this.supervisor(`/computers/${id}/stop`, {});
+    });
+    return this.status(id);
+  }
+  /**
+   * Pin a Dot to one remote box, or clear the pin (`remote: null`) to fall
+   * back to the first configured box.
+   */
+  async assignment(id: string, input: unknown) {
+    const patch = z
+      .object({ remote: z.string().max(64).nullable() })
+      .strict()
+      .parse(input);
+    await this.audited(id, 'assignment', 'owner', async () => {
+      const name = patch.remote?.trim() || null;
+      if (
+        name &&
+        !this.config.computerRemotes?.some((remote) => remote.name === name)
+      )
+        throw new Error('Unknown computer remote.');
+      this.workspace.computers.assign(id, name);
     });
     return this.status(id);
   }
@@ -277,7 +404,7 @@ export class ComputerService {
         controlSchema,
         await this.json(
           `${url}/control`,
-          this.token(id),
+          this.remoteToken(this.remoteFor(id), id),
           undefined,
           undefined,
           id,
@@ -288,7 +415,7 @@ export class ComputerService {
           controlSchema,
           await this.json(
             `${url}/control/request`,
-            this.token(id),
+            this.remoteToken(this.remoteFor(id), id),
             { reason: 'Owner requested control.' },
             undefined,
             id,
@@ -303,7 +430,7 @@ export class ComputerService {
           controlSchema,
           await this.json(
             `${url}/control/request`,
-            this.token(id),
+            this.remoteToken(this.remoteFor(id), id),
             { reason: 'Owner requested control.' },
             undefined,
             id,
@@ -313,7 +440,7 @@ export class ComputerService {
         throw new Error('There is no active control request.');
       await this.json(
         `${url}/control/${verb}`,
-        this.token(id),
+        this.remoteToken(this.remoteFor(id), id),
         { requestId: control.request.id },
         undefined,
         id,
@@ -356,12 +483,13 @@ export class ComputerService {
         const url = await this.running(id, activeSignal);
         this.allowed(id, kind, actor);
         activeSignal.throwIfAborted();
+        await this.ensureRemotePolicy(id, activeSignal);
         const path = action
           .replace(/^files_/, 'files/')
           .replace(/^human_/, 'human/');
         const result = await this.json(
           `${url}/${path}`,
-          this.token(id),
+          this.remoteToken(this.remoteFor(id), id),
           ['read', 'screenshot'].includes(action) ? undefined : parsed,
           activeSignal,
           id,

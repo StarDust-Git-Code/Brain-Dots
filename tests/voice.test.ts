@@ -21,6 +21,7 @@ function fixture() {
     voiceKey: 'test-secret',
     voiceModel: 'voice-model',
     voiceName: 'marin',
+    voiceProvider: 'openai',
     runtimeUrl: '',
     slackUsers: [],
   };
@@ -328,4 +329,70 @@ it('keeps successful compute turns cached and enforces the six-turn cap', async 
     'six compute-turn limit',
   );
   await f.voice.end(call.id, '');
+});
+
+it('prefers the persisted workspace voice over the configured default', async () => {
+  const store = new Store(':memory:');
+  const workspace = new WorkspaceStore(':memory:', 'owner');
+  workspace.bindThread('thread', workspace.dots()[0].id, 'A conversation');
+  resources.push(() => {
+    store.close();
+    workspace.close();
+  });
+  store.updateSettings({ voiceName: 'Achernar' });
+  const transport = vi.fn<typeof fetch>(
+    async () =>
+      new Response(JSON.stringify({ name: 'auth_tokens/test' }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+  );
+  const config: PlatformConfig = {
+    baseUrl: 'https://example.com',
+    voiceKey: 'test-secret',
+    voiceModel: 'gemini-3.8-live',
+    voiceName: 'marin',
+    voiceProvider: 'gemini',
+    runtimeUrl: '',
+    slackUsers: [],
+  };
+  const voice = new VoiceService(
+    {
+      workspace,
+      store,
+      config,
+      turn: vi.fn(async () => 'ok'),
+      history: vi.fn(async () => 'user: hi'),
+      requireReady() {},
+      setup: () => ({
+        voice: true,
+        intelligence: true,
+        model: true,
+        browser: false,
+        composio: false,
+        slack: 'not_configured',
+        missing: [],
+      }),
+    },
+    transport,
+  );
+  const begin = await voice.begin(
+    'thread',
+    undefined,
+    new AbortController().signal,
+  );
+  expect(begin).toMatchObject({
+    provider: 'gemini',
+    voice: 'Achernar',
+    model: 'gemini-3.8-live',
+  });
+  await voice.end(begin.id, '');
+  // Clearing the override falls back to the configured default (with the
+  // openai-only 'marin' mapped to Charon).
+  store.updateSettings({ voiceName: null });
+  const fallback = await voice.begin(
+    'thread',
+    undefined,
+    new AbortController().signal,
+  );
+  expect(fallback).toMatchObject({ voice: 'Charon' });
 });

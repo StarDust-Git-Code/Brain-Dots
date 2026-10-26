@@ -1,11 +1,21 @@
 const characters = ['blue', 'mint', 'orange', 'purple'] as const;
 
-/** Stable identity keeps each specialist recognizable across views and reloads. */
+/**
+ * Stable identity keeps each specialist recognizable across views and reloads.
+ * UUID-shaped ids concentrate in one color bucket under the plain multiplicative
+ * hash, so the murmur3-style avalanche finalizer spreads the low bits first.
+ */
 function characterFor(identity?: string) {
   if (!identity) return characters[0];
   let hash = 0;
   for (const character of identity)
     hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  hash = hash ^ (hash >>> 16);
+  hash = Math.imul(hash, 0x85ebca6b) >>> 0;
+  hash = hash ^ (hash >>> 13);
+  hash = Math.imul(hash, 0xc2b2ae35) >>> 0;
+  hash = hash ^ (hash >>> 16);
+  hash = hash >>> 0;
   return characters[hash % characters.length];
 }
 

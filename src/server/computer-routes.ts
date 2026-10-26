@@ -21,7 +21,10 @@ export function computerRoutes(computers: ComputerService) {
       text === 'There is no active control request.'
     )
       return c.json({ error: text }, 409);
-    if (text === 'Unknown computer action.')
+    if (
+      text === 'Unknown computer action.' ||
+      text === 'Unknown computer remote.'
+    )
       return c.json({ error: text }, 400);
     return c.json({ error: text }, 503);
   });
@@ -30,6 +33,9 @@ export function computerRoutes(computers: ComputerService) {
   );
   app.patch('/dots/:id/computer/permissions', async (c) =>
     c.json(await computers.permissions(c.req.param('id'), await c.req.json())),
+  );
+  app.patch('/dots/:id/computer/assignment', async (c) =>
+    c.json(await computers.assignment(c.req.param('id'), await c.req.json())),
   );
   app.post('/dots/:id/computer/start', async (c) =>
     c.json(await computers.start(c.req.param('id'))),

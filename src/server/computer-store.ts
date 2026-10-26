@@ -7,7 +7,27 @@ import type {
 export class ComputerStore {
   constructor(private db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS computer_permissions(dotId TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS computer_assignment(dotId TEXT PRIMARY KEY,remote TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS computer_audit(id TEXT PRIMARY KEY,dotId TEXT NOT NULL,action TEXT NOT NULL,actor TEXT NOT NULL,outcome TEXT NOT NULL,createdAt INTEGER NOT NULL);`);
+  }
+  /**
+   * Which remote stack this Dot's computer actions route to. Null means the
+   * default (the first configured remote).
+   */
+  assignment(id: string): string | null {
+    const row = this.db
+      .prepare('SELECT remote FROM computer_assignment WHERE dotId=?')
+      .get(id);
+    return row ? String(row.remote) : null;
+  }
+  assign(id: string, remote: string | null) {
+    if (remote === null) {
+      this.db.prepare('DELETE FROM computer_assignment WHERE dotId=?').run(id);
+      return;
+    }
+    this.db
+      .prepare('INSERT OR REPLACE INTO computer_assignment VALUES (?,?)')
+      .run(id, remote);
   }
   permissions(id: string): ComputerPermissions {
     const row = this.db

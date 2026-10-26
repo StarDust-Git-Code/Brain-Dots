@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Dot, Memory, State, WorkspaceState } from '../shared/types';
+import { GEMINI_VOICES } from '../shared/voices';
+import { api } from './api';
 import { ConnectionsSection } from './ConnectionsSection';
 import {
   setThemePreference,
@@ -69,10 +71,31 @@ export function WorkspaceDialog({
   const [skillDelivery, setSkillDelivery] = useState(
     dialog.type === 'dot' ? (dialog.dot?.skillDeliveryEnabled ?? false) : false,
   );
+  const [voiceChoice, setVoiceChoice] = useState(
+    dialog.type === 'settings' ? (state.settings.voiceName ?? '') : '',
+  );
+  const [voiceMeta, setVoiceMeta] = useState<{
+    provider: string;
+    voice: string;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [theme, setTheme] = useState(themePreference);
   const container = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (dialog.type !== 'settings') return;
+    let current = true;
+    api<{ provider: string; voice: string }>('/voice/provider', 'GET')
+      .then((meta) => {
+        if (current) setVoiceMeta(meta);
+      })
+      .catch(() => {
+        // The picker simply stays hidden when the call service is unreachable.
+      });
+    return () => {
+      current = false;
+    };
+  }, [dialog.type]);
   useEffect(() => {
     const previous =
       document.activeElement instanceof HTMLElement
@@ -173,6 +196,7 @@ export function WorkspaceDialog({
                 researchAllowed: research,
                 memoryAllowed: memory,
                 appsAllowed: apps,
+                voiceName: voiceChoice || null,
               };
             }
             if (dialog.type === 'memory') {
@@ -449,6 +473,43 @@ export function WorkspaceDialog({
               <p className="muted">
                 Saved in this browser. System follows your device.
               </p>
+            </fieldset>
+          )}
+          {dialog.type === 'settings' && voiceMeta?.provider === 'gemini' && (
+            <fieldset className="space-access-fields">
+              <legend>Call voice</legend>
+              <p className="muted">
+                How your Dot sounds during voice calls. Applies from the next
+                call onward.
+              </p>
+              <label className="field-label" htmlFor="voice-name">
+                Voice
+              </label>
+              <select
+                id="voice-name"
+                value={voiceChoice}
+                onChange={(e) => setVoiceChoice(e.target.value)}
+              >
+                <option value="">Default ({voiceMeta.voice})</option>
+                <optgroup label="Female">
+                  {GEMINI_VOICES.filter((v) => v.gender === 'female').map(
+                    (voice) => (
+                      <option key={voice.name} value={voice.name}>
+                        {voice.name} — {voice.tag}
+                      </option>
+                    ),
+                  )}
+                </optgroup>
+                <optgroup label="Male">
+                  {GEMINI_VOICES.filter((v) => v.gender === 'male').map(
+                    (voice) => (
+                      <option key={voice.name} value={voice.name}>
+                        {voice.name} — {voice.tag}
+                      </option>
+                    ),
+                  )}
+                </optgroup>
+              </select>
             </fieldset>
           )}
           {dialog.type === 'settings' && (

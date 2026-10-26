@@ -164,14 +164,31 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   app.get('/conversations/:id/capture', (c) =>
     c.json(platform.workspace.capture(c.req.param('id'))),
   );
+  app.get('/voice/provider', (c) => {
+    const provider = platform.config.voiceProvider ?? 'openai';
+    const configVoice =
+      platform.config.voiceName === 'marin' && provider === 'gemini'
+        ? 'Charon'
+        : platform.config.voiceName;
+    return c.json({
+      provider,
+      voice:
+        (provider === 'gemini' ? platform.store.settings().voiceName : null) ??
+        configVoice,
+      override: platform.store.settings().voiceName ?? null,
+    });
+  });
   app.post('/voice/calls', async (c) => {
     const data = z
-      .object({ threadId: z.string(), sdp: z.string().max(100000) })
+      .object({ threadId: z.string(), sdp: z.string().max(100000).optional() })
       .strict()
       .safeParse(await c.req.json().catch(() => null));
     if (!data.success)
       return c.json(
-        { error: 'A conversation and audio SDP offer are required.' },
+        {
+          error:
+            'A conversation is required; an audio SDP offer is needed for the OpenAI voice provider.',
+        },
         400,
       );
     return c.json(

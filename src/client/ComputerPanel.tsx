@@ -628,6 +628,27 @@ export function ComputerPanel({ dot }: { dot: Dot }) {
           </details>
           <details className="computer-settings">
             <summary>Computer settings</summary>{' '}
+            {status.remotes && status.remotes.length > 0 && (
+              <label className="computer-assignment">
+                Computer box
+                <select
+                  value={status.assignment ?? ''}
+                  disabled={busy || !status.configured}
+                  onChange={(event) =>
+                    void run(
+                      '/assignment',
+                      { remote: event.target.value || null },
+                      'PATCH',
+                    )
+                  }
+                >
+                  <option value="">Default (first box)</option>
+                  {status.remotes.map((name) => (
+                    <option key={name}>{name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <details
               className="computer-permissions"
               open={!status.permissions.enabled}

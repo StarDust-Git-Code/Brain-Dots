@@ -25,7 +25,11 @@ export function validateRuntimeScope(
   // Match the whole path. The SDK accepts suffix matches, so accepting arbitrary
   // prefixes here would validate a different thread than the SDK dispatches.
   if (path === 'info' || path === 'threads') methods = ['GET'];
-  else if (path === 'threads/subscribe') methods = ['POST'];
+  else if (path === 'inspector-learning') {
+    // Learning snapshot for the Inspector panel; scoped like other runtime reads.
+    agentId = url.searchParams.get('agentId') ?? undefined;
+    methods = ['GET'];
+  } else if (path === 'threads/subscribe') methods = ['POST'];
   else if ((match = path.match(/^agent\/([^/]+)\/(run|connect|suggest)$/))) {
     agentId = id(match[1]);
     threadId = typeof data.threadId === 'string' ? data.threadId : undefined;

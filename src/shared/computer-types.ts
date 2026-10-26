@@ -28,6 +28,10 @@ export interface ComputerStatus {
   permissions: ComputerPermissions;
   audit: ComputerAudit[];
   control?: ComputerControl;
+  /** Which remote box this Dot is pinned to; null uses the default box. */
+  assignment?: string | null;
+  /** Names of the configured remote boxes, when remote routing is active. */
+  remotes?: string[];
   error?: string;
 }
 const path = z
