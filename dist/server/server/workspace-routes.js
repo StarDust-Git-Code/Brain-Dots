@@ -101,14 +101,45 @@ export function workspaceRoutes(platform, voice) {
             .object({
             dotId: z.string(),
             title: z.string().trim().min(1).max(120).default('A new thought'),
+            model: z.string().trim().min(1).max(64).nullish(),
         })
             .strict()
             .safeParse(await c.req.json().catch(() => null));
         if (!data.success)
             return c.json({ error: 'Select a Dot and a conversation title.' }, 400);
+        const chatModels = platform.config.chatModels;
+        if (data.data.model &&
+            !chatModels?.options.some((o) => o.id === data.data.model))
+            return c.json({ error: 'Unknown chat model.' }, 400);
         if (platform.setup().missing.length)
             return c.json({ error: `Setup required: ${platform.setup().missing.join(', ')}.` }, 503);
-        return c.json(await platform.createConversation(data.data.dotId, data.data.title), 201);
+        return c.json(await platform.createConversation(data.data.dotId, data.data.title, data.data.model ?? null), 201);
+    });
+    app.get('/models', (c) => c.json({
+        models: platform.config.chatModels?.options ?? [],
+        defaultId: platform.config.chatModels?.defaultId ?? 'default',
+    }));
+    app.patch('/conversations/:id', async (c) => {
+        const data = z
+            .object({ model: z.string().trim().min(1).max(64).nullable() })
+            .strict()
+            .safeParse(await c.req.json().catch(() => null));
+        if (!data.success)
+            return c.json({ error: 'Select a chat model or null to reset it.' }, 400);
+        const chatModels = platform.config.chatModels;
+        if (data.data.model !== null &&
+            !chatModels?.options.some((option) => option.id === data.data.model))
+            return c.json({ error: 'Unknown chat model.' }, 400);
+        try {
+            return c.json(platform.workspace.setThreadModel(c.req.param('id'), data.data.model));
+        }
+        catch (error) {
+            return c.json({
+                error: error instanceof Error
+                    ? error.message
+                    : 'Conversation model could not be updated.',
+            }, 404);
+        }
     });
     app.get('/conversations/:id/capture', (c) => c.json(platform.workspace.capture(c.req.param('id'))));
     app.get('/voice/provider', (c) => {

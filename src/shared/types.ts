@@ -103,6 +103,8 @@ export interface Conversation {
   createdAt: number;
   /** Frozen at creation; null means this conversation does not participate. */
   learningContainerId?: string | null;
+  /** Chat model override (chat-model catalog id); null uses the default. */
+  model?: string | null;
 }
 export interface CallReceipt {
   anchorMessageId?: string | null;

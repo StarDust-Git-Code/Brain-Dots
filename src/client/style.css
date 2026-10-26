@@ -2299,6 +2299,19 @@ h3 {
 .chat-compose-row .icon-button {
   margin-bottom: 5px;
 }
+.chat-model-select {
+  border: 0;
+  background: #eff2f4;
+  color: #5c6b73;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 11px;
+  max-width: 130px;
+  height: 30px;
+  margin-bottom: 5px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
 .chat-compose-note {
   font-size: 11px;
   color: #606b63;

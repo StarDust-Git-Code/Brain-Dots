@@ -1,5 +1,6 @@
 import type { WebConfig } from './parallel.js';
 import type { SetupStatus } from '../shared/types.js';
+import type { ChatModelCatalog } from '../shared/chat-models.js';
 
 // `copilotkit project select` writes the CLI name and deletes the template name.
 const INTELLIGENCE_API_KEY_ENV_NAMES = [
@@ -120,6 +121,8 @@ export interface PlatformConfig extends WebConfig {
   model?: string;
   apiKey?: string;
   baseUrl: string;
+  /** Selectable chat models; conversations may override the default. */
+  chatModels?: ChatModelCatalog;
   agentRunTimeoutMs?: number;
   computerSupervisorUrl?: string;
   computerSupervisorToken?: string;

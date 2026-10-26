@@ -10,6 +10,7 @@ import { resolveAppOrigins } from './app-origin.js';
 import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
 import { agentRunTimeoutMsFromEnv, computerRemotesFromEnv, intelligenceApiKeyFromEnv, intelligenceWsUrlFromEnv, voiceProviderFromEnv, } from './platform-config.js';
+import { buildChatModelCatalog } from '../shared/chat-models.js';
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 4310);
 const ownerToken = process.env.OWNER_TOKEN;
@@ -52,6 +53,7 @@ const config = {
     runtimeUrl: `http://${host === '::1' ? '[::1]' : '127.0.0.1'}:${port}/api/copilotkit`,
     ownerToken,
 };
+config.chatModels = buildChatModelCatalog(config, process.env);
 const platform = new Platform(store, workspace, config);
 const researchConfig = {
     mode: 'live',

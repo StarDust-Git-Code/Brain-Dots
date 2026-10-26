@@ -31,6 +31,7 @@ import type {
   State,
   WorkspaceState,
 } from '../shared/types';
+import type { ChatModelOption } from '../shared/chat-models';
 import { api, ApiError, authHeaders, setToken } from './api';
 import { trackSetupStep } from './setup-telemetry';
 import {
@@ -131,6 +132,22 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [taskDetail, setTaskDetail] = useState<Detail>();
+  // Chat model catalog; loaded once. The chat picker stays hidden until it
+  // arrives, and the server remains on its default model when it is empty.
+  const [models, setModels] = useState<ChatModelOption[]>([]);
+  useEffect(() => {
+    let active = true;
+    void api<{ models: ChatModelOption[] }>('/models')
+      .then((data) => {
+        if (active) setModels(data.models);
+      })
+      .catch(() => {
+        /* not fatal: conversations keep the server default model */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   const refresh = useCallback(async () => {
     try {
       const [s, w] = await Promise.all([
@@ -625,6 +642,7 @@ export function App() {
                   initialPrompt={pendingPrompt}
                   onConsumed={() => setPendingPrompt(undefined)}
                   voiceReady={workspace.setup.voice}
+                  models={models}
                   calls={workspace.calls.filter(
                     (call) => call.threadId === thread.id,
                   )}

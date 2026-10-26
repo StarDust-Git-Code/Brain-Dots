@@ -329,12 +329,21 @@ export class DotAgent extends AbstractAgent {
           initialSettings.memoryAllowed && dot.memoryAllowed
             ? this.store.memories().map((memory) => memory.text)
             : [];
-        const adapter = openaiCompatibleText(this.config.model, {
-          apiKey: this.config.apiKey,
-          baseURL: this.config.baseUrl ?? 'https://api.openai.com/v1',
-          api: 'chat-completions',
-          maxRetries: 1,
-        });
+        const chatSelection = this.config.chatModels?.resolve(
+          conversation.model,
+        );
+        const adapter = openaiCompatibleText(
+          chatSelection?.model || this.config.model,
+          {
+            apiKey: chatSelection?.apiKey || this.config.apiKey,
+            baseURL:
+              chatSelection?.baseUrl ??
+              this.config.baseUrl ??
+              'https://api.openai.com/v1',
+            api: 'chat-completions',
+            maxRetries: 1,
+          },
+        );
         const start = async () => {
           const appTools =
             this.config.composioApiKey &&

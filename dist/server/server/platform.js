@@ -109,7 +109,7 @@ export class Platform {
         await this.setupTelemetry.stop();
         await this.handler?.channels?.stop();
     }
-    async createConversation(dotId, title) {
+    async createConversation(dotId, title, model) {
         this.requireReady();
         if (!this.workspace.dot(dotId))
             throw new Error('Dot not found.');
@@ -125,7 +125,8 @@ export class Platform {
         catch {
             throw new Error('Intelligence could not create this conversation. Check the runtime key and connection.');
         }
-        return this.workspace.bindThread(id, dotId, title);
+        const thread = this.workspace.bindThread(id, dotId, title);
+        return model ? this.workspace.setThreadModel(id, model) : thread;
     }
     async history(threadId) {
         this.requireReady();

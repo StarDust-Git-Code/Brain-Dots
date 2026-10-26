@@ -33,6 +33,7 @@ import {
 } from './ComputerToolCard';
 import { ChatTranscript, isInternalVoiceReceipt } from './ChatTranscript';
 import type { CallReceipt, Conversation, Dot } from '../shared/types';
+import type { ChatModelOption } from '../shared/chat-models';
 import { Mascot } from './Mascot';
 import { useVoice } from './useVoice';
 import { CallView } from './CallView';
@@ -46,6 +47,7 @@ export function Chat({
   voiceReady,
   calls,
   paused,
+  models,
   onSaved,
   onSchedule,
   onComputer,
@@ -57,6 +59,7 @@ export function Chat({
   voiceReady: boolean;
   calls: CallReceipt[];
   paused: boolean;
+  models?: ChatModelOption[];
   onSaved: () => void;
   onSchedule: () => void;
   onComputer?: () => void;
@@ -102,6 +105,22 @@ export function Chat({
   const chatError = error || runError;
   const [loaded, setLoaded] = useState(false);
   const [running, setRunning] = useState(false);
+  const selectedModel = (models ?? []).some(
+    (option) => option.id === (thread.model ?? 'default'),
+  )
+    ? (thread.model ?? 'default')
+    : 'default';
+  const setModel = (id: string) => {
+    void api<Conversation>(`/conversations/${thread.id}`, 'PATCH', {
+      model: id === 'default' ? null : id,
+    })
+      .then(() => onSaved())
+      .catch((e) =>
+        setError(
+          e instanceof Error ? e.message : 'Model could not be changed.',
+        ),
+      );
+  };
   const voice = useVoice(thread.id, onSaved, agent.messages.at(-1)?.id);
   const sent = useRef(false);
   const bottom = useRef<HTMLDivElement>(null);
@@ -437,6 +456,21 @@ export function Chat({
           </div>
         )}
         <div className="chat-compose-row">
+          {(models ?? []).length > 1 && (
+            <select
+              className="chat-model-select"
+              aria-label="Chat model"
+              title="Model for this conversation"
+              value={selectedModel}
+              onChange={(e) => setModel(e.target.value)}
+            >
+              {(models ?? []).map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             className="icon-button"

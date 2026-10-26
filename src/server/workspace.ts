@@ -33,6 +33,7 @@ export class WorkspaceStore {
       ['dots', 'composioSessionId', 'TEXT'],
       ['dots', 'composioPolicyHash', 'TEXT'],
       ['thread_bindings', 'learningContainerId', 'TEXT'],
+      ['thread_bindings', 'model', 'TEXT'],
     ]) {
       if (
         !this.db
@@ -290,6 +291,15 @@ export class WorkspaceStore {
         value.learningContainerId ?? null,
       );
     return value;
+  }
+  /** A null model clears the override and returns the conversation to the default. */
+  setThreadModel(id: string, model: string | null): Conversation {
+    const thread = this.requireThread(id);
+    const next = { ...thread, model: model?.trim() || null };
+    this.db
+      .prepare('UPDATE thread_bindings SET model=? WHERE id=?')
+      .run(next.model, id);
+    return next;
   }
   requireThread(id: string, dotId?: string): Conversation {
     const thread = this.conversations().find((thread) => thread.id === id);

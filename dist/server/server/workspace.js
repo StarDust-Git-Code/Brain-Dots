@@ -32,6 +32,7 @@ export class WorkspaceStore {
             ['dots', 'composioSessionId', 'TEXT'],
             ['dots', 'composioPolicyHash', 'TEXT'],
             ['thread_bindings', 'learningContainerId', 'TEXT'],
+            ['thread_bindings', 'model', 'TEXT'],
         ]) {
             if (!this.db
                 .prepare(`PRAGMA table_info(${table})`)
@@ -202,6 +203,15 @@ export class WorkspaceStore {
             .prepare('INSERT INTO thread_bindings (id, dotId, ownerId, title, createdAt, learningContainerId) VALUES (?, ?, ?, ?, ?, ?)')
             .run(id, dotId, this.ownerId, title, value.createdAt, value.learningContainerId ?? null);
         return value;
+    }
+    /** A null model clears the override and returns the conversation to the default. */
+    setThreadModel(id, model) {
+        const thread = this.requireThread(id);
+        const next = { ...thread, model: model?.trim() || null };
+        this.db
+            .prepare('UPDATE thread_bindings SET model=? WHERE id=?')
+            .run(next.model, id);
+        return next;
     }
     requireThread(id, dotId) {
         const thread = this.conversations().find((thread) => thread.id === id);
