@@ -11,6 +11,7 @@ import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
 import { agentRunTimeoutMsFromEnv, computerRemotesFromEnv, intelligenceApiKeyFromEnv, intelligenceWsUrlFromEnv, voiceProviderFromEnv, } from './platform-config.js';
 import { buildChatModelCatalog } from '../shared/chat-models.js';
+import { restoreLatestSnapshot, snapshotConfigFromEnv, startSnapshots, } from './supabase-snapshot.js';
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 4310);
 const ownerToken = process.env.OWNER_TOKEN;
@@ -18,6 +19,10 @@ if (!['127.0.0.1', '::1', 'localhost'].includes(host) &&
     (!ownerToken || ownerToken.length < 24))
     throw new Error('External binding requires an OWNER_TOKEN of at least 24 characters.');
 const database = process.env.DATABASE_PATH ?? 'data/opendots.sqlite';
+const snapshots = snapshotConfigFromEnv(process.env);
+if (snapshots)
+    await restoreLatestSnapshot(snapshots, database).catch((error) => console.error('[snapshot] restore failed:', error));
+let snapshotHandle;
 const geminiVoice = voiceProviderFromEnv(process.env) === 'gemini';
 const store = new Store(database);
 const workspace = new WorkspaceStore(database, process.env.OWNER_ID ?? 'opendots-owner');
@@ -95,6 +100,8 @@ app.use('/*', serveStatic({ root: './dist/client' }));
 app.get('*', serveStatic({ path: './dist/client/index.html' }));
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
     console.log(`OpenDots template listening on http://${host}:${info.port}`);
+    if (snapshots)
+        snapshotHandle = startSnapshots(snapshots, database);
     runner.start();
     void platform
         .start()
@@ -102,7 +109,15 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
 });
 const shutdown = createShutdown({
     stopRunner: () => runner.stop(),
-    stopPlatform: () => platform.stop(),
+    stopPlatform: async () => {
+        try {
+            await snapshotHandle?.final();
+        }
+        catch (error) {
+            console.error('[snapshot] final snapshot failed:', error);
+        }
+        await platform.stop();
+    },
     closeServer: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
     exit: (code) => process.exit(code),
     report: (operation, error) => reportChannelFailure(operation, [safeFailure(error)]),

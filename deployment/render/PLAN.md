@@ -233,13 +233,37 @@ Render keys used in chat must be rotated (both accounts).
 
 ## Persistence decision (deferred)
 
-Approved plan: **Supabase Storage snapshot** backup/restore
-(snapshot `store.db` to a Supabase bucket on a schedule, restore on
-boot when the disk is empty). Free tier, no credit card. Chosen over
-GitHub-repo snapshots; Turso (libSQL) noted as the eventual zero-loss
-end-state; Firebase Storage needs Blaze (card) so it lost. Implement
-before relying on the cloud for real data — until then every deploy
-(eploy includes env-only changes) wipes the database.
+## Supabase Storage snapshot persistence (2026-10-27, implemented)
+
+- Module: `src/server/supabase-snapshot.ts` — plain Supabase Storage
+  REST over `fetch` (no SDK, no new dependency).
+- Boot restore: when the SQLite file (`data/opendots.sqlite`) is
+  missing or zero bytes, `index.ts` restores the newest snapshot
+  (padded-epoch newest, filtered by pre-existing connections) BEFORE
+  the stores open. No snapshot → fresh seed.
+- Snapshot cycle: runs once right after `serve` starts, then every
+  `SUPABASE_SNAPSHOT_INTERVAL_MS` (default 4 min, floor 60 s).
+  `PRAGMA wal_checkpoint(TRUNCATE)` then uploads the main db file as
+  `snap-<epoch>.sqlite`; keeps the 3 newest, prunes older (DELETE with
+  auth-only headers — Supabase 400s on json content-type + no body).
+  Shutdown: `stopPlatform` piggybacks one final flush before
+  `platform.stop()`.
+- Object list API gotcha: POST body REQUIRES `prefix` (even empty);
+  omitting it 400s despite the docs examples.
+- Env contract: only active when `SUPABASE_SNAPSHOT_ENABLED` is truthy
+  AND `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` present (incomplete
+  - enabled throws at boot). `SUPABASE_BUCKET` defaults `dots-backup`.
+    Deliberate design: keys are in every `.env`, but only the cloud
+    service gets `SUPABASE_SNAPSHOT_ENABLED=true` (deploy script), so
+    local dev machines cannot race the deployment that owns the bucket.
+- Supabase project: `ilkekzrftdefgurmtpnz` (`opendots-dots`, free tier,
+  private bucket `dots-backup`). Live E2E verified round-trip on the
+  real bucket (seed temp db → snapshot → missing target → restore →
+  row content matches).
+- Data-loss window: worst case one snapshot interval (~4 min) for a
+  hard kill; graceful redeploy loses nothing (final flush on SIGTERM).
+- Remaining risk: none known; restore only when the disk file is
+  empty, so it never overwrites a healthy boot.
 
 ## Owner checklist (nothing in chat)
 

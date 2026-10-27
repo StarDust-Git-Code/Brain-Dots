@@ -18,6 +18,12 @@ import {
   type PlatformConfig,
 } from './platform-config.js';
 import { buildChatModelCatalog } from '../shared/chat-models.js';
+import {
+  restoreLatestSnapshot,
+  snapshotConfigFromEnv,
+  startSnapshots,
+  type SnapshotHandle,
+} from './supabase-snapshot.js';
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 4310);
 const ownerToken = process.env.OWNER_TOKEN;
@@ -29,6 +35,12 @@ if (
     'External binding requires an OWNER_TOKEN of at least 24 characters.',
   );
 const database = process.env.DATABASE_PATH ?? 'data/opendots.sqlite';
+const snapshots = snapshotConfigFromEnv(process.env);
+if (snapshots)
+  await restoreLatestSnapshot(snapshots, database).catch((error) =>
+    console.error('[snapshot] restore failed:', error),
+  );
+let snapshotHandle: SnapshotHandle | undefined;
 const geminiVoice = voiceProviderFromEnv(process.env) === 'gemini';
 const store = new Store(database);
 const workspace = new WorkspaceStore(
@@ -121,6 +133,7 @@ app.use('/*', serveStatic({ root: './dist/client' }));
 app.get('*', serveStatic({ path: './dist/client/index.html' }));
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`OpenDots template listening on http://${host}:${info.port}`);
+  if (snapshots) snapshotHandle = startSnapshots(snapshots, database);
   runner.start();
   void platform
     .start()
@@ -133,7 +146,14 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
 });
 const shutdown = createShutdown({
   stopRunner: () => runner.stop(),
-  stopPlatform: () => platform.stop(),
+  stopPlatform: async () => {
+    try {
+      await snapshotHandle?.final();
+    } catch (error) {
+      console.error('[snapshot] final snapshot failed:', error);
+    }
+    await platform.stop();
+  },
   closeServer: () =>
     new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
